@@ -1,0 +1,27 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Cancha del club, estado operativo y configuración de disponibilidad (RD06).
+/// Mapeado a public.canchas en Supabase.
+/// </summary>
+public class Cancha
+{
+    public string Id { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string TipoCanchaId { get; set; } = string.Empty;
+    public string Superficie { get; set; } = string.Empty;
+    public int Capacidad { get; set; } = 4;
+    public decimal PrecioPorHora { get; set; }
+    public string Estado { get; set; } = "disponible"; // 'disponible' | 'ocupada' | 'mantenimiento'
+    public string? Descripcion { get; set; }
+    public string? NotasMantenimiento { get; set; }
+    public string DisponibilidadJson { get; set; } =
+        """{"days":["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"],"openTime":"08:00","closeTime":"22:00","slotMinutes":60,"blockedRanges":[]}""";
+    public string? FotoUrl { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public TipoCancha? TipoCancha { get; set; }
+    public ICollection<Reserva> Reservas { get; set; } = new List<Reserva>();
+    public ICollection<Clase> Clases { get; set; } = new List<Clase>();
+}

@@ -1,0 +1,36 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Pago, seña 50%, saldo 50%, inscripción, cuota o reembolso e integración con Mercado Pago (RD11).
+/// Mapeado a public.pagos en Supabase.
+/// </summary>
+public class Pago
+{
+    public string Id { get; set; } = string.Empty;
+    public string? ReservaId { get; set; }
+    public string? TorneoId { get; set; }
+    public string? ClaseId { get; set; }
+    public string UsuarioId { get; set; } = string.Empty;
+    public string ClienteNombre { get; set; } = string.Empty;
+    public string ClienteDni { get; set; } = string.Empty;
+    public string Concepto { get; set; } = string.Empty;
+    public string TipoPago { get; set; } = "sena_50"; // 'sena_50' | 'saldo_50' | 'inscripcion' | 'cuota_clase' | 'cargo_cancelacion' | 'reembolso'
+    public string MedioPago { get; set; } = "Mercado Pago (QR)";
+    public decimal MontoTotal { get; set; }
+    public string Estado { get; set; } = "completado"; // 'pendiente' | 'completado' | 'rechazado' | 'reembolsado'
+    public string? MpPreferenceId { get; set; }
+    public string? MpPaymentId { get; set; }
+    public string? MpStatus { get; set; }
+    public string? QrData { get; set; }
+    public string? PaymentUrl { get; set; }
+    public string ItemsJson { get; set; } = "[]";
+    public string CajeroNombre { get; set; } = "Cobro Digital Online";
+    public DateTimeOffset FechaPago { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public Reserva? Reserva { get; set; }
+    public Torneo? Torneo { get; set; }
+    public Clase? Clase { get; set; }
+    public Usuario? Usuario { get; set; }
+}

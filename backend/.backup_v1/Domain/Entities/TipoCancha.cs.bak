@@ -1,0 +1,22 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Catálogo de superficies de juego y parámetros operativos (RD07 / RD10).
+/// Mapeado a public.tipos_cancha en Supabase.
+/// </summary>
+public class TipoCancha
+{
+    public string Id { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string? Etiqueta { get; set; }
+    public string? Descripcion { get; set; }
+    public string? Velocidad { get; set; }
+    public decimal PrecioBaseHora { get; set; }
+    public string? FrecuenciaMantenimiento { get; set; }
+    public int MaxAlumnosPorClase { get; set; } = 30;
+    public bool Activo { get; set; } = true;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public ICollection<Cancha> Canchas { get; set; } = new List<Cancha>();
+}

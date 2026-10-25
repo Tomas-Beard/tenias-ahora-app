@@ -1,0 +1,23 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Registro de profesionales con licencia oficial habilitante AAT (RD08 / RD09).
+/// Mapeado a public.profesores en Supabase.
+/// </summary>
+public class Profesor
+{
+    public string Id { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string Tipo { get; set; } = "Profesor"; // 'Profesor' | 'Entrenador'
+    public string Dni { get; set; } = string.Empty;
+    public string? Telefono { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public bool PoseeLicenciaOficial { get; set; } = true;
+    public string? HorariosDisponibles { get; set; }
+    public string DetalleLicenciaJson { get; set; } = "{}";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public ICollection<Usuario> UsuariosVinculados { get; set; } = new List<Usuario>();
+    public ICollection<Clase> ClasesDictadas { get; set; } = new List<Clase>();
+}

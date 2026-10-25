@@ -1,0 +1,28 @@
+# Directorios de compilación e IDE
+bin/
+obj/
+out/
+publish/
+.vs/
+.vscode/
+.idea/
+
+# Respaldos locales y migraciones SQL
+.backup_v1/
+*.bak
+supabase/
+
+# Archivos de usuario, entorno y bases locales
+*.user
+*.suo
+*.db
+*.sqlite
+.env
+.env.*
+appsettings.Development.json
+appsettings.Local.json
+
+# Logs y temporales
+*.log
+logs/
+tmp/

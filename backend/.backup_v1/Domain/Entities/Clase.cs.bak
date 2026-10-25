@@ -1,0 +1,34 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Clase grupal, particular o entrenamiento con validación de profesor habilitado y cupo (RD07-RD10).
+/// Mapeado a public.clases en Supabase.
+/// </summary>
+public class Clase
+{
+    public string Id { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string Tipo { get; set; } = "grupal"; // 'grupal' | 'particular'
+    public string Modalidad { get; set; } = "clase"; // 'clase' | 'entrenamiento'
+    public string ProfesorId { get; set; } = string.Empty;
+    public string NombreProfesor { get; set; } = string.Empty;
+    public string? CanchaId { get; set; }
+    public string? CanchaAsignada { get; set; }
+    public string? DiasHorario { get; set; }
+    public string? FranjaHoraria { get; set; }
+    public DateOnly? FechaParticular { get; set; }
+    public int CupoMaximo { get; set; } = 30;
+    public int InscriptosActuales { get; set; }
+    public decimal Arancel { get; set; }
+    public string? MesNombre { get; set; }
+    public string SesionesJson { get; set; } = "[]";
+    public string AlumnosJson { get; set; } = "[]";
+    public string Estado { get; set; } = "activa"; // 'activa' | 'programada' | 'confirmada' | 'finalizada' | 'cancelada'
+    public string? Notas { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public Profesor? Profesor { get; set; }
+    public Cancha? Cancha { get; set; }
+    public ICollection<Pago> Pagos { get; set; } = new List<Pago>();
+}

@@ -1,0 +1,669 @@
+-- =============================================================================
+-- PROYECTO: Tenis Ahora (IEEE SRS-830)
+-- ARCHIVO: 001_schema_core_and_domain_rules.sql
+-- DESCRIPCIÓN: Esquema relacional principal, índices de claves foráneas y
+--              triggers PL/pgSQL para cumplimiento estricto de reglas de dominio.
+-- MOTOR: Supabase (PostgreSQL 15+)
+-- =============================================================================
+
+BEGIN;
+
+-- -----------------------------------------------------------------------------
+-- 1. EXTENSIONES REQUERIDAS
+-- -----------------------------------------------------------------------------
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- -----------------------------------------------------------------------------
+-- 2. FUNCIÓN UTILITARIA PARA AUDITORÍA DE TIMESTAMPS (updated_at)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.fn_actualizar_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+BEGIN
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- 3. TABLAS PRINCIPALES DEL DOMINIO
+-- -----------------------------------------------------------------------------
+
+-- 3.1. Catálogo de Tipos de Cancha / Superficies (RD07 / RD10)
+CREATE TABLE IF NOT EXISTS public.tipos_cancha (
+    id VARCHAR(64) PRIMARY KEY,
+    nombre VARCHAR(100) UNIQUE NOT NULL,
+    etiqueta VARCHAR(120),
+    descripcion TEXT,
+    velocidad VARCHAR(50),
+    precio_base_hora NUMERIC(12,2) NOT NULL CHECK (precio_base_hora >= 0),
+    frecuencia_mantenimiento VARCHAR(200),
+    max_alumnos_por_clase INT NOT NULL DEFAULT 30 CHECK (max_alumnos_por_clase BETWEEN 1 AND 30),
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.tipos_cancha IS 'Catálogo de superficies de juego y parámetros operativos (RD07/RD10).';
+
+-- 3.2. Profesores y Entrenadores Habilitados (RD08 / RD09)
+CREATE TABLE IF NOT EXISTS public.profesores (
+    id VARCHAR(64) PRIMARY KEY,
+    nombre VARCHAR(150) NOT NULL,
+    tipo VARCHAR(30) NOT NULL CHECK (tipo IN ('Profesor', 'Entrenador')),
+    dni VARCHAR(20) UNIQUE NOT NULL,
+    telefono VARCHAR(50),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    posee_licencia_oficial BOOLEAN NOT NULL DEFAULT TRUE,
+    horarios_disponibles TEXT,
+    detalle_licencia JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.profesores IS 'Registro de profesionales con licencia oficial habilitante AAT (RD08/RD09).';
+
+-- 3.3. Usuarios / Socios / Perfiles Vinculados a Supabase Auth
+CREATE TABLE IF NOT EXISTS public.usuarios (
+    id VARCHAR(64) PRIMARY KEY,
+    auth_user_id UUID UNIQUE REFERENCES auth.users(id) ON DELETE SET NULL,
+    nombre VARCHAR(150) NOT NULL,
+    dni VARCHAR(20) UNIQUE NOT NULL,
+    telefono VARCHAR(50),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    direccion VARCHAR(255),
+    rol VARCHAR(30) NOT NULL DEFAULT 'client' CHECK (rol IN ('admin', 'client', 'coach')),
+    profesor_id VARCHAR(64) REFERENCES public.profesores(id) ON DELETE SET NULL,
+    numero_socio VARCHAR(50) UNIQUE,
+    socio_desde DATE NOT NULL DEFAULT CURRENT_DATE,
+    descuentos_activos JSONB NOT NULL DEFAULT '[]'::jsonb,
+    total_reservas INT NOT NULL DEFAULT 0 CHECK (total_reservas >= 0),
+    foto_url TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.usuarios IS 'Usuarios del sistema vinculados a Supabase Auth con roles admin, client y coach.';
+
+-- 3.4. Canchas del Club (RD06)
+CREATE TABLE IF NOT EXISTS public.canchas (
+    id VARCHAR(64) PRIMARY KEY,
+    nombre VARCHAR(150) NOT NULL,
+    tipo_cancha_id VARCHAR(64) NOT NULL REFERENCES public.tipos_cancha(id) ON DELETE RESTRICT,
+    superficie VARCHAR(100) NOT NULL,
+    capacidad INT NOT NULL DEFAULT 4 CHECK (capacidad > 0),
+    precio_por_hora NUMERIC(12,2) NOT NULL CHECK (precio_por_hora >= 0),
+    estado VARCHAR(30) NOT NULL DEFAULT 'disponible' CHECK (estado IN ('disponible', 'ocupada', 'mantenimiento')),
+    descripcion TEXT,
+    notas_mantenimiento TEXT,
+    disponibilidad JSONB NOT NULL DEFAULT '{"days":["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"],"openTime":"08:00","closeTime":"22:00","slotMinutes":60,"blockedRanges":[]}'::jsonb,
+    foto_url TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.canchas IS 'Inventario de canchas de tenis, estado operativo y configuración horaria (RD06).';
+
+-- 3.5. Inventario de Equipamiento y Stock Operativo
+CREATE TABLE IF NOT EXISTS public.stock (
+    id VARCHAR(64) PRIMARY KEY,
+    nombre VARCHAR(150) NOT NULL,
+    categoria VARCHAR(50) NOT NULL CHECK (categoria IN ('Redes', 'Pelotas', 'Raquetas', 'Accesorios', 'Equipamiento')),
+    stock_total INT NOT NULL CHECK (stock_total >= 0),
+    stock_en_uso INT NOT NULL DEFAULT 0 CHECK (stock_en_uso >= 0),
+    stock_disponible INT NOT NULL CHECK (stock_disponible >= 0 AND stock_total = stock_en_uso + stock_disponible),
+    unidad VARCHAR(50) NOT NULL DEFAULT 'unidades',
+    precio_unitario NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (precio_unitario >= 0),
+    estado VARCHAR(30) NOT NULL DEFAULT 'disponible' CHECK (estado IN ('disponible', 'agotado')),
+    descripcion TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.stock IS 'Control de inventario de redes, pelotas, raquetas y accesorios con validación estricta.';
+
+-- 3.6. Reservas de Canchas (RD05, RD06, Seña 50% y Máximo 2 Horas)
+CREATE TABLE IF NOT EXISTS public.reservas (
+    id VARCHAR(64) PRIMARY KEY,
+    cancha_id VARCHAR(64) NOT NULL REFERENCES public.canchas(id) ON DELETE RESTRICT,
+    usuario_id VARCHAR(64) NOT NULL REFERENCES public.usuarios(id) ON DELETE RESTRICT,
+    titular_dni VARCHAR(20) NOT NULL,
+    nombre_cancha VARCHAR(150) NOT NULL,
+    superficie VARCHAR(100) NOT NULL,
+    fecha DATE NOT NULL,
+    hora_inicio TIME NOT NULL,
+    hora_fin TIME NOT NULL,
+    duracion_horas NUMERIC(4,2) NOT NULL CHECK (duracion_horas > 0 AND duracion_horas <= 2.00),
+    tipo_partido VARCHAR(20) NOT NULL DEFAULT 'singles' CHECK (tipo_partido IN ('singles', 'dobles')),
+    participantes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    equipamiento_asignado JSONB NOT NULL DEFAULT '{"nets": 1, "ballTubes": 1, "rackets": 2}'::jsonb,
+    costo_cancha NUMERIC(12,2) NOT NULL CHECK (costo_cancha >= 0),
+    costo_equipamiento NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (costo_equipamiento >= 0),
+    costo_total NUMERIC(12,2) NOT NULL CHECK (costo_total > 0),
+    sena_pagada NUMERIC(12,2) NOT NULL CHECK (sena_pagada >= ROUND(costo_total * 0.50, 2)),
+    recibo_sena_id VARCHAR(64),
+    metodo_pago_sena VARCHAR(50),
+    saldo_pendiente NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (saldo_pendiente >= 0),
+    saldo_abonado BOOLEAN NOT NULL DEFAULT FALSE,
+    recibo_final_id VARCHAR(64),
+    estado VARCHAR(30) NOT NULL DEFAULT 'pendiente_pago' CHECK (estado IN ('pendiente_pago', 'confirmada', 'finalizada', 'cancelada')),
+    detalle_cancelacion JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_reservas_rango_horario CHECK (
+        hora_fin > hora_inicio
+        AND (EXTRACT(EPOCH FROM (hora_fin - hora_inicio)) / 3600.0) <= 2.00
+    )
+);
+
+COMMENT ON TABLE public.reservas IS 'Reservas de canchas con validación de duración <= 2h, antelación <= 30 días, seña 50% y bloqueo de stock.';
+
+-- 3.7. Torneos y Ligas (RD12 / RF041)
+CREATE TABLE IF NOT EXISTS public.torneos (
+    id VARCHAR(64) PRIMARY KEY,
+    nombre VARCHAR(200) NOT NULL,
+    categoria VARCHAR(100) NOT NULL,
+    modalidad VARCHAR(50) NOT NULL DEFAULT 'Singles' CHECK (modalidad IN ('Singles', 'Dobles', 'Liga')),
+    superficie_requerida VARCHAR(100),
+    fecha_inicio DATE NOT NULL,
+    fecha_fin DATE NOT NULL CHECK (fecha_fin >= fecha_inicio),
+    costo_inscripcion NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (costo_inscripcion >= 0),
+    max_participantes INT NOT NULL DEFAULT 16 CHECK (max_participantes >= 2),
+    inscriptos_actuales INT NOT NULL DEFAULT 0 CHECK (inscriptos_actuales >= 0 AND inscriptos_actuales <= max_participantes),
+    estado VARCHAR(40) NOT NULL DEFAULT 'inscripcion_abierta' CHECK (estado IN ('inscripcion_abierta', 'en_curso', 'finalizado', 'cancelado')),
+    descripcion TEXT,
+    reglamento_interno TEXT NOT NULL,
+    documento_reglamento JSONB,
+    participantes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cuadro JSONB NOT NULL DEFAULT '[]'::jsonb,
+    tabla_posiciones JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.torneos IS 'Gestión de torneos y ligas con reglamento interno obligatorio (RD12/RF041).';
+
+-- 3.8. Clases Grupales, Particulares y Entrenamientos (RD07 / RD08 / RD09 / RD10)
+CREATE TABLE IF NOT EXISTS public.clases (
+    id VARCHAR(64) PRIMARY KEY,
+    nombre VARCHAR(200) NOT NULL,
+    tipo VARCHAR(30) NOT NULL DEFAULT 'grupal' CHECK (tipo IN ('grupal', 'particular')),
+    modalidad VARCHAR(30) NOT NULL DEFAULT 'clase' CHECK (modalidad IN ('clase', 'entrenamiento')),
+    profesor_id VARCHAR(64) NOT NULL REFERENCES public.profesores(id) ON DELETE RESTRICT,
+    nombre_profesor VARCHAR(150) NOT NULL,
+    cancha_id VARCHAR(64) REFERENCES public.canchas(id) ON DELETE SET NULL,
+    cancha_asignada VARCHAR(150),
+    dias_horario VARCHAR(150),
+    franja_horaria VARCHAR(100),
+    fecha_particular DATE,
+    cupo_maximo INT NOT NULL DEFAULT 30 CHECK (cupo_maximo > 0 AND cupo_maximo <= 30),
+    inscriptos_actuales INT NOT NULL DEFAULT 0 CHECK (inscriptos_actuales >= 0 AND inscriptos_actuales <= cupo_maximo),
+    arancel NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (arancel >= 0),
+    mes_nombre VARCHAR(50),
+    sesiones JSONB NOT NULL DEFAULT '[]'::jsonb,
+    alumnos JSONB NOT NULL DEFAULT '[]'::jsonb,
+    estado VARCHAR(30) NOT NULL DEFAULT 'activa' CHECK (estado IN ('activa', 'programada', 'confirmada', 'finalizada', 'cancelada')),
+    notas TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.clases IS 'Clases y entrenamientos dictados por profesores habilitados con control de cupo (RD07-RD10).';
+
+-- 3.9. Pagos, Señas, Saldos e Integración con Mercado Pago (RD11)
+CREATE TABLE IF NOT EXISTS public.pagos (
+    id VARCHAR(64) PRIMARY KEY,
+    reserva_id VARCHAR(64) REFERENCES public.reservas(id) ON DELETE RESTRICT,
+    torneo_id VARCHAR(64) REFERENCES public.torneos(id) ON DELETE SET NULL,
+    clase_id VARCHAR(64) REFERENCES public.clases(id) ON DELETE SET NULL,
+    usuario_id VARCHAR(64) NOT NULL REFERENCES public.usuarios(id) ON DELETE RESTRICT,
+    cliente_nombre VARCHAR(150) NOT NULL,
+    cliente_dni VARCHAR(20) NOT NULL,
+    concepto VARCHAR(255) NOT NULL,
+    tipo_pago VARCHAR(30) NOT NULL CHECK (tipo_pago IN ('sena_50', 'saldo_50', 'inscripcion', 'cuota_clase', 'cargo_cancelacion', 'reembolso')),
+    medio_pago VARCHAR(50) NOT NULL CHECK (medio_pago IN ('Mercado Pago', 'Mercado Pago (QR)', 'Tarjeta de Débito', 'Tarjeta de Crédito', 'Billetera Virtual', 'Retención sobre seña', 'Crédito en cuenta de socio')),
+    monto_total NUMERIC(12,2) NOT NULL CHECK (monto_total > 0),
+    estado VARCHAR(30) NOT NULL DEFAULT 'pendiente' CHECK (estado IN ('pendiente', 'completado', 'rechazado', 'reembolsado')),
+    mp_preference_id VARCHAR(120),
+    mp_payment_id VARCHAR(120),
+    mp_status VARCHAR(50),
+    qr_data TEXT,
+    payment_url TEXT,
+    items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cajero_nombre VARCHAR(100) NOT NULL DEFAULT 'Cobro Digital Online',
+    fecha_pago TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.pagos IS 'Registro de transacciones financieras, señas 50%, saldos 50% y preferencias/QR de Mercado Pago (RD11).';
+
+-- -----------------------------------------------------------------------------
+-- 4. ÍNDICES EN CLAVES FORÁNEAS Y COLUMNAS DE FILTRADO FRECUENTE / RLS
+-- -----------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_usuarios_auth_user_id ON public.usuarios(auth_user_id);
+CREATE INDEX IF NOT EXISTS idx_usuarios_profesor_id ON public.usuarios(profesor_id);
+CREATE INDEX IF NOT EXISTS idx_usuarios_rol ON public.usuarios(rol);
+
+CREATE INDEX IF NOT EXISTS idx_canchas_tipo_cancha_id ON public.canchas(tipo_cancha_id);
+CREATE INDEX IF NOT EXISTS idx_canchas_estado ON public.canchas(estado);
+
+CREATE INDEX IF NOT EXISTS idx_stock_categoria ON public.stock(categoria);
+
+CREATE INDEX IF NOT EXISTS idx_reservas_cancha_id ON public.reservas(cancha_id);
+CREATE INDEX IF NOT EXISTS idx_reservas_usuario_id ON public.reservas(usuario_id);
+CREATE INDEX IF NOT EXISTS idx_reservas_cancha_fecha_estado ON public.reservas(cancha_id, fecha, estado);
+
+CREATE INDEX IF NOT EXISTS idx_clases_profesor_id ON public.clases(profesor_id);
+CREATE INDEX IF NOT EXISTS idx_clases_cancha_id ON public.clases(cancha_id);
+
+CREATE INDEX IF NOT EXISTS idx_pagos_reserva_id ON public.pagos(reserva_id);
+CREATE INDEX IF NOT EXISTS idx_pagos_torneo_id ON public.pagos(torneo_id);
+CREATE INDEX IF NOT EXISTS idx_pagos_clase_id ON public.pagos(clase_id);
+CREATE INDEX IF NOT EXISTS idx_pagos_usuario_id ON public.pagos(usuario_id);
+
+-- -----------------------------------------------------------------------------
+-- 5. TRIGGERS DE AUDITORÍA (updated_at)
+-- -----------------------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_tipos_cancha_updated_at ON public.tipos_cancha;
+CREATE TRIGGER trg_tipos_cancha_updated_at
+    BEFORE UPDATE ON public.tipos_cancha
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+DROP TRIGGER IF EXISTS trg_profesores_updated_at ON public.profesores;
+CREATE TRIGGER trg_profesores_updated_at
+    BEFORE UPDATE ON public.profesores
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+DROP TRIGGER IF EXISTS trg_usuarios_updated_at ON public.usuarios;
+CREATE TRIGGER trg_usuarios_updated_at
+    BEFORE UPDATE ON public.usuarios
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+DROP TRIGGER IF EXISTS trg_canchas_updated_at ON public.canchas;
+CREATE TRIGGER trg_canchas_updated_at
+    BEFORE UPDATE ON public.canchas
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+DROP TRIGGER IF EXISTS trg_stock_updated_at ON public.stock;
+CREATE TRIGGER trg_stock_updated_at
+    BEFORE UPDATE ON public.stock
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+DROP TRIGGER IF EXISTS trg_reservas_updated_at ON public.reservas;
+CREATE TRIGGER trg_reservas_updated_at
+    BEFORE UPDATE ON public.reservas
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+DROP TRIGGER IF EXISTS trg_torneos_updated_at ON public.torneos;
+CREATE TRIGGER trg_torneos_updated_at
+    BEFORE UPDATE ON public.torneos
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+DROP TRIGGER IF EXISTS trg_clases_updated_at ON public.clases;
+CREATE TRIGGER trg_clases_updated_at
+    BEFORE UPDATE ON public.clases
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+DROP TRIGGER IF EXISTS trg_pagos_updated_at ON public.pagos;
+CREATE TRIGGER trg_pagos_updated_at
+    BEFORE UPDATE ON public.pagos
+    FOR EACH ROW EXECUTE FUNCTION public.fn_actualizar_updated_at();
+
+-- -----------------------------------------------------------------------------
+-- 6. REGLAS DE DOMINIO ESTRICTAS EN PL/pgSQL (IEEE SRS-830)
+-- -----------------------------------------------------------------------------
+
+-- 6.1. Validación de Reglas de Reserva:
+--      - Duración máxima de 2 horas y congruencia horaria.
+--      - Antelación máxima de 30 días calendario (RD05).
+--      - Bloqueo por mantenimiento de cancha y no solapamiento horario (RD06).
+--      - Validación de seña mínima del 50% al reservar y 50% restante al finalizar.
+CREATE OR REPLACE FUNCTION public.fn_validar_reglas_reserva()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_horas_calculadas NUMERIC(4,2);
+    v_estado_cancha VARCHAR(30);
+    v_reserva_solapada VARCHAR(64);
+BEGIN
+    -- 1. Validación de duración máxima de 2 horas y congruencia entre hora_inicio y hora_fin
+    IF NEW.hora_fin <= NEW.hora_inicio THEN
+        RAISE EXCEPTION 'La hora de finalización (%) debe ser posterior a la hora de inicio (%).', NEW.hora_fin, NEW.hora_inicio
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    v_horas_calculadas := ROUND((EXTRACT(EPOCH FROM (NEW.hora_fin - NEW.hora_inicio)) / 3600.0)::numeric, 2);
+
+    IF v_horas_calculadas <= 0 OR v_horas_calculadas > 2.00 OR NEW.duracion_horas <= 0 OR NEW.duracion_horas > 2.00 THEN
+        RAISE EXCEPTION 'Regla de negocio violada: La duración máxima permitida por reserva es de 2 horas (solicitado: % h).', v_horas_calculadas
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    IF v_horas_calculadas <> ROUND(NEW.duracion_horas, 2) THEN
+        RAISE EXCEPTION 'Inconsistencia horaria: El rango % - % (% h) no coincide con duracion_horas (% h).',
+            NEW.hora_inicio, NEW.hora_fin, v_horas_calculadas, NEW.duracion_horas
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    -- 2. Validación de antelación máxima de 30 días calendario (RD05)
+    IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.fecha IS DISTINCT FROM OLD.fecha) THEN
+        IF NEW.fecha < CURRENT_DATE THEN
+            RAISE EXCEPTION 'RD05 violada: No se permiten reservas en fechas pasadas (%).', NEW.fecha
+                USING ERRCODE = 'P0001';
+        END IF;
+
+        IF NEW.fecha > (CURRENT_DATE + INTERVAL '30 days')::date THEN
+            RAISE EXCEPTION 'RD05 violada: La antelación máxima permitida para reservar es de 30 días calendario (fecha solicitada: %, máximo permitido: %).',
+                NEW.fecha, (CURRENT_DATE + INTERVAL '30 days')::date
+                USING ERRCODE = 'P0001';
+        END IF;
+    END IF;
+
+    -- 3. Validación de cobro obligatorio de seña (50%) y saldo al finalizar
+    IF NEW.sena_pagada < ROUND(NEW.costo_total * 0.50, 2) THEN
+        RAISE EXCEPTION 'Regla de cobro violada: Es obligatorio abonar al menos el 50%% de seña al reservar (mínimo requerido: $, recibido: $%).',
+            ROUND(NEW.costo_total * 0.50, 2), NEW.sena_pagada
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    IF NEW.estado = 'finalizada' AND (NEW.saldo_abonado IS DISTINCT FROM TRUE OR NEW.saldo_pendiente > 0) THEN
+        RAISE EXCEPTION 'Regla de cobro violada: Para finalizar la reserva es obligatorio haber procesado el 50%% restante (saldo pendiente actual: $%).',
+            NEW.saldo_pendiente
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    -- 4. Bloqueo por mantenimiento de cancha y solapamiento horario (RD06)
+    IF NEW.estado IN ('pendiente_pago', 'confirmada') THEN
+        SELECT c.estado
+          INTO v_estado_cancha
+          FROM public.canchas c
+         WHERE c.id = NEW.cancha_id;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'La cancha especificada (%) no existe.', NEW.cancha_id
+                USING ERRCODE = 'P0001';
+        END IF;
+
+        IF v_estado_cancha = 'mantenimiento' THEN
+            RAISE EXCEPTION 'RD06 violada: La cancha % se encuentra actualmente en mantenimiento y no admite reservas.', NEW.cancha_id
+                USING ERRCODE = 'P0001';
+        END IF;
+
+        SELECT r.id
+          INTO v_reserva_solapada
+          FROM public.reservas r
+         WHERE r.cancha_id = NEW.cancha_id
+           AND r.fecha = NEW.fecha
+           AND r.id <> NEW.id
+           AND r.estado IN ('pendiente_pago', 'confirmada')
+           AND (NEW.hora_inicio < r.hora_fin AND NEW.hora_fin > r.hora_inicio)
+         LIMIT 1;
+
+        IF FOUND THEN
+            RAISE EXCEPTION 'RD06 violada: Existe solapamiento horario en la cancha % para la fecha % con la reserva activa %.',
+                NEW.cancha_id, NEW.fecha, v_reserva_solapada
+                USING ERRCODE = 'P0001';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validar_reglas_reserva ON public.reservas;
+CREATE TRIGGER trg_validar_reglas_reserva
+    BEFORE INSERT OR UPDATE ON public.reservas
+    FOR EACH ROW EXECUTE FUNCTION public.fn_validar_reglas_reserva();
+
+-- 6.2. Gestión Automática de Stock en Reservas:
+--      - Al reservar (BEFORE INSERT): verifica que Redes, Pelotas y Raquetas tengan
+--        stock_disponible > 0 y suficiente; si es 0 o insuficiente bloquea la reserva.
+--        Descuenta automáticamente el equipamiento asignado.
+--      - Al finalizar o cancelar (AFTER UPDATE OF estado): restituye el equipamiento
+--        al stock disponible.
+CREATE OR REPLACE FUNCTION public.fn_gestionar_stock_reserva()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_req_redes INT;
+    v_req_pelotas INT;
+    v_req_raquetas INT;
+    v_stock_record RECORD;
+    v_found_redes BOOLEAN := FALSE;
+    v_found_pelotas BOOLEAN := FALSE;
+    v_found_raquetas BOOLEAN := FALSE;
+    v_nuevo_disponible INT;
+    v_nuevo_en_uso INT;
+BEGIN
+    -- CASO A: Alta de reserva activa -> verificar y descontar stock
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.estado IN ('pendiente_pago', 'confirmada') THEN
+            v_req_redes := GREATEST(COALESCE((NEW.equipamiento_asignado ->> 'nets')::int, 1), 1);
+            v_req_pelotas := GREATEST(COALESCE((NEW.equipamiento_asignado ->> 'ballTubes')::int, 1), 1);
+            v_req_raquetas := GREATEST(COALESCE((NEW.equipamiento_asignado ->> 'rackets')::int, 2), 1);
+
+            -- Bloqueo pesimista en orden determinístico para evitar deadlocks
+            FOR v_stock_record IN
+                SELECT id, nombre, categoria, stock_total, stock_en_uso, stock_disponible
+                  FROM public.stock
+                 WHERE categoria IN ('Redes', 'Pelotas', 'Raquetas')
+                 ORDER BY categoria ASC, id ASC
+                   FOR UPDATE
+            LOOP
+                IF v_stock_record.categoria = 'Redes' AND NOT v_found_redes THEN
+                    v_found_redes := TRUE;
+                    IF v_stock_record.stock_disponible <= 0 OR v_stock_record.stock_disponible < v_req_redes THEN
+                        RAISE EXCEPTION 'Reserva bloqueada por falta de stock: No hay stock suficiente de Redes (disponible: %, requerido: %).',
+                            v_stock_record.stock_disponible, v_req_redes
+                            USING ERRCODE = 'P0001';
+                    END IF;
+
+                    v_nuevo_disponible := v_stock_record.stock_disponible - v_req_redes;
+                    v_nuevo_en_uso := v_stock_record.stock_en_uso + v_req_redes;
+
+                    UPDATE public.stock
+                       SET stock_disponible = v_nuevo_disponible,
+                           stock_en_uso = v_nuevo_en_uso,
+                           estado = CASE WHEN v_nuevo_disponible = 0 THEN 'agotado' ELSE 'disponible' END
+                     WHERE id = v_stock_record.id;
+
+                ELSIF v_stock_record.categoria = 'Pelotas' AND NOT v_found_pelotas THEN
+                    v_found_pelotas := TRUE;
+                    IF v_stock_record.stock_disponible <= 0 OR v_stock_record.stock_disponible < v_req_pelotas THEN
+                        RAISE EXCEPTION 'Reserva bloqueada por falta de stock: No hay stock suficiente de Pelotas (disponible: %, requerido: %).',
+                            v_stock_record.stock_disponible, v_req_pelotas
+                            USING ERRCODE = 'P0001';
+                    END IF;
+
+                    v_nuevo_disponible := v_stock_record.stock_disponible - v_req_pelotas;
+                    v_nuevo_en_uso := v_stock_record.stock_en_uso + v_req_pelotas;
+
+                    UPDATE public.stock
+                       SET stock_disponible = v_nuevo_disponible,
+                           stock_en_uso = v_nuevo_en_uso,
+                           estado = CASE WHEN v_nuevo_disponible = 0 THEN 'agotado' ELSE 'disponible' END
+                     WHERE id = v_stock_record.id;
+
+                ELSIF v_stock_record.categoria = 'Raquetas' AND NOT v_found_raquetas THEN
+                    v_found_raquetas := TRUE;
+                    IF v_stock_record.stock_disponible <= 0 OR v_stock_record.stock_disponible < v_req_raquetas THEN
+                        RAISE EXCEPTION 'Reserva bloqueada por falta de stock: No hay stock suficiente de Raquetas (disponible: %, requerido: %).',
+                            v_stock_record.stock_disponible, v_req_raquetas
+                            USING ERRCODE = 'P0001';
+                    END IF;
+
+                    v_nuevo_disponible := v_stock_record.stock_disponible - v_req_raquetas;
+                    v_nuevo_en_uso := v_stock_record.stock_en_uso + v_req_raquetas;
+
+                    UPDATE public.stock
+                       SET stock_disponible = v_nuevo_disponible,
+                           stock_en_uso = v_nuevo_en_uso,
+                           estado = CASE WHEN v_nuevo_disponible = 0 THEN 'agotado' ELSE 'disponible' END
+                     WHERE id = v_stock_record.id;
+                END IF;
+            END LOOP;
+
+            IF NOT (v_found_redes AND v_found_pelotas AND v_found_raquetas) THEN
+                RAISE EXCEPTION 'Reserva bloqueada: El inventario no cuenta con los ítems obligatorios (Redes, Pelotas, Raquetas) configurados en stock.'
+                    USING ERRCODE = 'P0001';
+            END IF;
+        END IF;
+
+        RETURN NEW;
+    END IF;
+
+    -- CASO B: Transición de reserva activa a finalizada o cancelada -> restituir stock
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.estado IN ('pendiente_pago', 'confirmada') AND NEW.estado IN ('finalizada', 'cancelada') THEN
+            v_req_redes := GREATEST(COALESCE((OLD.equipamiento_asignado ->> 'nets')::int, 1), 1);
+            v_req_pelotas := GREATEST(COALESCE((OLD.equipamiento_asignado ->> 'ballTubes')::int, 1), 1);
+            v_req_raquetas := GREATEST(COALESCE((OLD.equipamiento_asignado ->> 'rackets')::int, 2), 1);
+
+            FOR v_stock_record IN
+                SELECT id, categoria, stock_total, stock_en_uso, stock_disponible
+                  FROM public.stock
+                 WHERE categoria IN ('Redes', 'Pelotas', 'Raquetas')
+                 ORDER BY categoria ASC, id ASC
+                   FOR UPDATE
+            LOOP
+                IF v_stock_record.categoria = 'Redes' AND NOT v_found_redes THEN
+                    v_found_redes := TRUE;
+                    v_nuevo_en_uso := GREATEST(0, v_stock_record.stock_en_uso - v_req_redes);
+                    v_nuevo_disponible := v_stock_record.stock_total - v_nuevo_en_uso;
+
+                    UPDATE public.stock
+                       SET stock_en_uso = v_nuevo_en_uso,
+                           stock_disponible = v_nuevo_disponible,
+                           estado = CASE WHEN v_nuevo_disponible = 0 THEN 'agotado' ELSE 'disponible' END
+                     WHERE id = v_stock_record.id;
+
+                ELSIF v_stock_record.categoria = 'Pelotas' AND NOT v_found_pelotas THEN
+                    v_found_pelotas := TRUE;
+                    v_nuevo_en_uso := GREATEST(0, v_stock_record.stock_en_uso - v_req_pelotas);
+                    v_nuevo_disponible := v_stock_record.stock_total - v_nuevo_en_uso;
+
+                    UPDATE public.stock
+                       SET stock_en_uso = v_nuevo_en_uso,
+                           stock_disponible = v_nuevo_disponible,
+                           estado = CASE WHEN v_nuevo_disponible = 0 THEN 'agotado' ELSE 'disponible' END
+                     WHERE id = v_stock_record.id;
+
+                ELSIF v_stock_record.categoria = 'Raquetas' AND NOT v_found_raquetas THEN
+                    v_found_raquetas := TRUE;
+                    v_nuevo_en_uso := GREATEST(0, v_stock_record.stock_en_uso - v_req_raquetas);
+                    v_nuevo_disponible := v_stock_record.stock_total - v_nuevo_en_uso;
+
+                    UPDATE public.stock
+                       SET stock_en_uso = v_nuevo_en_uso,
+                           stock_disponible = v_nuevo_disponible,
+                           estado = CASE WHEN v_nuevo_disponible = 0 THEN 'agotado' ELSE 'disponible' END
+                     WHERE id = v_stock_record.id;
+                END IF;
+            END LOOP;
+        END IF;
+
+        RETURN NEW;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_reservas_stock_insert ON public.reservas;
+CREATE TRIGGER trg_reservas_stock_insert
+    BEFORE INSERT ON public.reservas
+    FOR EACH ROW EXECUTE FUNCTION public.fn_gestionar_stock_reserva();
+
+DROP TRIGGER IF EXISTS trg_reservas_stock_update ON public.reservas;
+CREATE TRIGGER trg_reservas_stock_update
+    AFTER UPDATE OF estado ON public.reservas
+    FOR EACH ROW EXECUTE FUNCTION public.fn_gestionar_stock_reserva();
+
+-- 6.3. Validación de Clases y Profesionales:
+--      - RD08 / RD09: El profesor debe poseer licencia oficial AAT vigente y habilitada.
+--      - RD07 / RD10: El cupo máximo de la clase no puede superar 30 alumnos ni el
+--        límite específico del tipo de cancha asignado.
+CREATE OR REPLACE FUNCTION public.fn_validar_cupo_y_profesor_clase()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_profesor RECORD;
+    v_vencimiento_licencia DATE;
+    v_max_alumnos_superficie INT;
+BEGIN
+    -- 1. Validar licencia oficial vigente del profesor/entrenador (RD08 / RD09)
+    SELECT id, nombre, posee_licencia_oficial, detalle_licencia
+      INTO v_profesor
+      FROM public.profesores
+     WHERE id = NEW.profesor_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RD08 violada: El profesor asignado (%) no existe en el padrón oficial.', NEW.profesor_id
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    IF v_profesor.posee_licencia_oficial IS DISTINCT FROM TRUE
+       OR COALESCE(v_profesor.detalle_licencia ->> 'status', '') <> 'habilitado'
+       OR COALESCE(v_profesor.detalle_licencia ->> 'licenseNumber', '') = '' THEN
+        RAISE EXCEPTION 'RD08/RD09 violada: El profesional % no posee licencia oficial AAT habilitada.', v_profesor.nombre
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    IF (v_profesor.detalle_licencia ? 'expiryDate') THEN
+        v_vencimiento_licencia := (v_profesor.detalle_licencia ->> 'expiryDate')::date;
+        IF v_vencimiento_licencia < CURRENT_DATE THEN
+            RAISE EXCEPTION 'RD09 violada: La licencia oficial del profesional % venció el %.', v_profesor.nombre, v_vencimiento_licencia
+                USING ERRCODE = 'P0001';
+        END IF;
+    END IF;
+
+    -- 2. Validar cupo máximo respecto al límite general (30) y a la superficie asignada (RD07 / RD10)
+    IF NEW.cupo_maximo <= 0 OR NEW.cupo_maximo > 30 THEN
+        RAISE EXCEPTION 'RD07/RD10 violada: El cupo máximo por clase debe estar entre 1 y 30 alumnos (solicitado: %).', NEW.cupo_maximo
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    IF NEW.inscriptos_actuales < 0 OR NEW.inscriptos_actuales > NEW.cupo_maximo THEN
+        RAISE EXCEPTION 'RD10 violada: La cantidad de alumnos inscriptos (%) supera el cupo máximo de la clase (%).',
+            NEW.inscriptos_actuales, NEW.cupo_maximo
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    IF NEW.cancha_id IS NOT NULL THEN
+        SELECT tc.max_alumnos_por_clase
+          INTO v_max_alumnos_superficie
+          FROM public.canchas c
+          JOIN public.tipos_cancha tc ON tc.id = c.tipo_cancha_id
+         WHERE c.id = NEW.cancha_id;
+
+        IF FOUND AND NEW.cupo_maximo > v_max_alumnos_superficie THEN
+            RAISE EXCEPTION 'RD07/RD10 violada: El cupo máximo solicitado (%) excede la capacidad máxima permitida para el tipo de cancha asignado (% alumnos).',
+                NEW.cupo_maximo, v_max_alumnos_superficie
+                USING ERRCODE = 'P0001';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validar_cupo_y_profesor_clase ON public.clases;
+CREATE TRIGGER trg_validar_cupo_y_profesor_clase
+    BEFORE INSERT OR UPDATE ON public.clases
+    FOR EACH ROW EXECUTE FUNCTION public.fn_validar_cupo_y_profesor_clase();
+
+COMMIT;

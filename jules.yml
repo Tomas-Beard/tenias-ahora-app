@@ -1,0 +1,25 @@
+# Configuración del Agente Ejecutor (Jules)
+agent:
+  name: jules
+  role: Fullstack Executor & Code Writer
+  
+workspace:
+  # Directorios donde Jules tiene permisos de lectura y escritura
+  allowed_directories:
+    - "./backend"
+    - "./frontend"
+    - "./.antigravity/skills"
+  
+  # Directorios de solo lectura (para evitar que borre la referencia original)
+  read_only_directories:
+    - "./server-a85c104e11a2d3d2a6454c189db7fd41c3f84859" # Código Go original
+  
+execution_rules:
+  - "Lee las instrucciones delegadas por Argon 4 y ejecuta el código sin modificar la arquitectura propuesta."
+  - "Al modificar el directorio ./frontend, respeta la estructura actual de React."
+  - "Al escribir código C# en ./backend, genera archivos separados por clases e interfaces (no un solo archivo monolítico)."
+  - "Antes de sobreescribir un archivo, crea un backup temporal."
+
+context_awareness:
+  - "Aplica siempre las reglas de negocio del documento IEEE SRS-830 (Tenis Ahora)."
+  - "Valida que el código generado no rompa las directivas de los SKILL.md de la carpeta .antigravity."

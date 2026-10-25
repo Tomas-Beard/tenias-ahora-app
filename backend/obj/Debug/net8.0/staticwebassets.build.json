@@ -1,0 +1,11 @@
+{
+  "Version": 1,
+  "Hash": "LFkGfVTfLt2wICWMlxYqVI18HlexXsUpy5lWgt8KiDQ=",
+  "Source": "TenisAhora.Api",
+  "BasePath": "_content/TenisAhora.Api",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [],
+  "Assets": []
+}

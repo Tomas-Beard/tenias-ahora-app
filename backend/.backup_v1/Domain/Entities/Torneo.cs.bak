@@ -1,0 +1,30 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Torneo o Liga con reglamento interno obligatorio (RD12 / RF041).
+/// Mapeado a public.torneos en Supabase.
+/// </summary>
+public class Torneo
+{
+    public string Id { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string Categoria { get; set; } = string.Empty;
+    public string Modalidad { get; set; } = "Singles"; // 'Singles' | 'Dobles' | 'Liga'
+    public string? SuperficieRequerida { get; set; }
+    public DateOnly FechaInicio { get; set; }
+    public DateOnly FechaFin { get; set; }
+    public decimal CostoInscripcion { get; set; }
+    public int MaxParticipantes { get; set; } = 16;
+    public int InscriptosActuales { get; set; }
+    public string Estado { get; set; } = "inscripcion_abierta"; // 'inscripcion_abierta' | 'en_curso' | 'finalizado' | 'cancelado'
+    public string? Descripcion { get; set; }
+    public string ReglamentoInterno { get; set; } = string.Empty;
+    public string? DocumentoReglamentoJson { get; set; }
+    public string ParticipantesJson { get; set; } = "[]";
+    public string CuadroJson { get; set; } = "[]";
+    public string TablaPosicionesJson { get; set; } = "[]";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public ICollection<Pago> Pagos { get; set; } = new List<Pago>();
+}

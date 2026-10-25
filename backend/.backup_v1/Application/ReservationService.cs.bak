@@ -1,0 +1,1181 @@
+using System.Data;
+using System.Globalization;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using TenisAhora.Application.DTOs;
+using TenisAhora.Application.Interfaces;
+using TenisAhora.Domain.Entities;
+using TenisAhora.Domain.Exceptions;
+using TenisAhora.Infrastructure.Persistence;
+
+namespace TenisAhora.Application.Services;
+
+/// <summary>
+/// Servicio de aplicación que implementa la lógica de negocio de reservas de canchas,
+/// control atómico de stock, señas obligatorias del 50% vía Mercado Pago y políticas
+/// de cancelación (RD01 a RD06 — IEEE SRS-830).
+/// </summary>
+public class ReservationService : IReservationService
+{
+    private static readonly string[] SpanishWeekDays =
+    [
+        "Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"
+    ];
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
+
+    private readonly TenisAhoraDbContext _dbContext;
+    private readonly IMercadoPagoGateway _mercadoPagoGateway;
+    private readonly ICurrentUserService _currentUser;
+    private readonly ClubConfigOptions _clubConfig;
+
+    public ReservationService(
+        TenisAhoraDbContext dbContext,
+        IMercadoPagoGateway mercadoPagoGateway,
+        ICurrentUserService currentUser,
+        IOptions<ClubConfigOptions> clubConfigOptions)
+    {
+        _dbContext = dbContext;
+        _mercadoPagoGateway = mercadoPagoGateway;
+        _currentUser = currentUser;
+        _clubConfig = clubConfigOptions.Value;
+    }
+
+    /// <inheritdoc />
+    public async Task<CreateReservationResultDto> CreateReservationAsync(
+        CreateReservationRequestDto request,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_currentUser.IsStaff && !_currentUser.IsMember)
+        {
+            throw DomainException.Forbidden("Esta acción está permitida únicamente para socios o personal del club.");
+        }
+
+        // Validación de titularidad para socios (igual a guardCreate en authz.go)
+        var leadParticipant = request.Participants.FirstOrDefault();
+        var leadName = !string.IsNullOrWhiteSpace(leadParticipant?.Name)
+            ? leadParticipant!.Name.Trim()
+            : "Socio Tenis Ahora";
+        var leadDni = !string.IsNullOrWhiteSpace(leadParticipant?.Dni)
+            ? leadParticipant!.Dni.Trim()
+            : _currentUser.Dni;
+
+        if (!_currentUser.IsStaff && !_currentUser.IsMeByDni(leadDni))
+        {
+            throw DomainException.Forbidden("Solo podés reservar a tu nombre: el titular tiene que ser tu DNI.");
+        }
+
+        // Validaciones básicas de formato de fecha, hora y duración máxima de 2 horas (IEEE SRS-830)
+        if (!DateOnly.TryParseExact(request.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var reservationDate))
+        {
+            throw DomainException.BadRequest("La fecha de la reserva no es válida (formato AAAA-MM-DD).");
+        }
+
+        if (!TimeOnly.TryParseExact(request.StartTime, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var startTime))
+        {
+            throw DomainException.BadRequest("La hora de inicio no es válida (formato HH:mm).");
+        }
+
+        var durationHours = request.DurationHours <= 0 ? 1.0m : Math.Round(request.DurationHours, 2);
+        if (durationHours <= 0m || durationHours > 2.00m)
+        {
+            throw DomainException.BadRequest($"La duración máxima permitida por reserva es de 2 horas (solicitado: {durationHours:0.##} h).");
+        }
+
+        // RD05: Antelación máxima de 30 días calendario
+        ValidateBookingWindow(reservationDate);
+
+        var durationMinutes = (int)Math.Round(durationHours * 60m);
+        var startMinutes = startTime.Hour * 60 + startTime.Minute;
+        var endMinutes = startMinutes + durationMinutes;
+        if (endMinutes > 24 * 60)
+        {
+            throw DomainException.BadRequest("El turno solicitado excede el horario del día.");
+        }
+        var endTime = new TimeOnly(endMinutes / 60, endMinutes % 60);
+
+        // =========================================================================
+        // TRANSACCIÓN ATÓMICA OBLIGATORIA (Disponibilidad -> Stock -> Mercado Pago)
+        // =========================================================================
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
+
+        try
+        {
+            // ---------------------------------------------------------------------
+            // PASO 1: Verificar disponibilidad de cancha y no solapamiento (RD06)
+            // ---------------------------------------------------------------------
+            var cancha = await _dbContext.Canchas
+                .FirstOrDefaultAsync(c => c.Id == request.CourtId, cancellationToken);
+
+            if (cancha is null)
+            {
+                throw DomainException.NotFound($"La cancha '{request.CourtId}' no existe.");
+            }
+
+            if (string.Equals(cancha.Estado, "mantenimiento", StringComparison.OrdinalIgnoreCase))
+            {
+                throw DomainException.Conflict("La cancha está bloqueada por mantenimiento y no admite reservas (RD06).");
+            }
+
+            var blockReason = ValidateSlotBlock(cancha.DisponibilidadJson, reservationDate, startTime, durationHours);
+            if (!string.IsNullOrEmpty(blockReason))
+            {
+                throw DomainException.Conflict($"La cancha no admite reservas en ese turno: {blockReason} (RD06).");
+            }
+
+            var overlappingReservationId = await _dbContext.Reservas
+                .Where(r => r.CanchaId == cancha.Id
+                            && r.Fecha == reservationDate
+                            && (r.Estado == "pendiente_pago" || r.Estado == "confirmada")
+                            && startTime < r.HoraFin
+                            && endTime > r.HoraInicio)
+                .Select(r => r.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (!string.IsNullOrEmpty(overlappingReservationId))
+            {
+                throw DomainException.Conflict(
+                    $"La cancha ya posee una reserva activa ({overlappingReservationId}) en el horario {startTime:HH\\:mm} - {endTime:HH\\:mm} (RD06).");
+            }
+
+            // ---------------------------------------------------------------------
+            // PASO 2: Descontar Stock de materiales deportivos (Bloqueo si Stock == 0)
+            // ---------------------------------------------------------------------
+            var playersType = string.Equals(request.PlayersType, "dobles", StringComparison.OrdinalIgnoreCase)
+                ? "dobles"
+                : "singles";
+
+            var equipment = request.EquipmentAssigned ?? new EquipmentAssignedDto
+            {
+                Nets = 1,
+                BallTubes = 1,
+                Rackets = playersType == "dobles" ? 4 : 2
+            };
+
+            var reqNets = Math.Max(equipment.Nets, 1);
+            var reqBalls = Math.Max(equipment.BallTubes, 1);
+            var reqRackets = Math.Max(equipment.Rackets, 1);
+
+            var requiredCategories = new[] { "Redes", "Pelotas", "Raquetas" };
+            var stockItems = await _dbContext.StockItems
+                .Where(s => requiredCategories.Contains(s.Categoria))
+                .OrderBy(s => s.Categoria)
+                .ThenBy(s => s.Id)
+                .ToListAsync(cancellationToken);
+
+            var netItem = stockItems.FirstOrDefault(s => s.Categoria == "Redes");
+            var ballItem = stockItems.FirstOrDefault(s => s.Categoria == "Pelotas");
+            var racketItem = stockItems.FirstOrDefault(s => s.Categoria == "Raquetas");
+
+            if (netItem is null || netItem.StockDisponible <= 0 || netItem.StockDisponible < reqNets)
+            {
+                throw DomainException.Conflict(
+                    $"Reserva bloqueada por falta de stock: Redes disponibles ({netItem?.StockDisponible ?? 0}), requeridas ({reqNets}).");
+            }
+
+            if (ballItem is null || ballItem.StockDisponible <= 0 || ballItem.StockDisponible < reqBalls)
+            {
+                throw DomainException.Conflict(
+                    $"Reserva bloqueada por falta de stock: Pelotas disponibles ({ballItem?.StockDisponible ?? 0}), requeridas ({reqBalls}).");
+            }
+
+            if (racketItem is null || racketItem.StockDisponible <= 0 || racketItem.StockDisponible < reqRackets)
+            {
+                throw DomainException.Conflict(
+                    $"Reserva bloqueada por falta de stock: Raquetas disponibles ({racketItem?.StockDisponible ?? 0}), requeridas ({reqRackets}).");
+            }
+
+            if (_clubConfig.UseApplicationLayerStockManagement)
+            {
+                ApplyStockDeduction(netItem, reqNets);
+                ApplyStockDeduction(ballItem, reqBalls);
+                ApplyStockDeduction(racketItem, reqRackets);
+            }
+
+            // ---------------------------------------------------------------------
+            // PASO 3: Generar Preferencia de Pago en Mercado Pago (Seña 50% — RD01)
+            // ---------------------------------------------------------------------
+            var courtCost = Math.Round(cancha.PrecioPorHora * durationHours, 2, MidpointRounding.AwayFromZero);
+            var equipmentCost = Math.Max(request.EquipmentCost, 0m);
+            var totalCost = courtCost + equipmentCost;
+            var requiredDeposit50 = Math.Round(totalCost * 0.50m, 2, MidpointRounding.AwayFromZero);
+            var depositPaid = request.DepositPaid.HasValue && request.DepositPaid.Value >= requiredDeposit50
+                ? Math.Round(request.DepositPaid.Value, 2, MidpointRounding.AwayFromZero)
+                : requiredDeposit50;
+            var remainingBalance = Math.Max(totalCost - depositPaid, 0m);
+
+            var reservationId = await GenerateNextReservationIdAsync(cancellationToken);
+            var receiptId = $"REC-50-{Random.Shared.Next(1000, 9999)}";
+            var courtDisplayName = !string.IsNullOrWhiteSpace(request.CourtName)
+                ? request.CourtName.Trim()
+                : $"{cancha.Nombre} ({cancha.Superficie})";
+
+            var usuario = await ResolveReservationUserAsync(leadDni, cancellationToken);
+
+            var mpPreference = await _mercadoPagoGateway.CreateDepositPreferenceAsync(
+                new PaymentPreferenceRequestDto
+                {
+                    ExternalReference = reservationId,
+                    Title = $"Seña 50% Reserva {reservationId} - {courtDisplayName}",
+                    Description = $"Alquiler {durationHours:0.##}hs en {courtDisplayName} el {reservationDate:yyyy-MM-dd} ({startTime:HH\\:mm}-{endTime:HH\\:mm})",
+                    Amount = depositPaid,
+                    PayerName = leadName,
+                    PayerDni = leadDni,
+                    PayerEmail = usuario.Email
+                },
+                cancellationToken);
+
+            var participantsList = request.Participants.Count > 0
+                ? request.Participants
+                :
+                [
+                    new ReservationParticipantDto
+                    {
+                        Name = leadName,
+                        Dni = leadDni,
+                        Phone = usuario.Telefono,
+                        IsLead = true
+                    }
+                ];
+
+            var nowUtc = DateTimeOffset.UtcNow;
+            var paymentMethod = NormalizePaymentMethod(request.DepositPaymentMethod);
+
+            var reserva = new Reserva
+            {
+                Id = reservationId,
+                CanchaId = cancha.Id,
+                UsuarioId = usuario.Id,
+                TitularDni = leadDni,
+                NombreCancha = courtDisplayName,
+                Superficie = !string.IsNullOrWhiteSpace(request.SurfaceType) ? request.SurfaceType.Trim() : cancha.Superficie,
+                Fecha = reservationDate,
+                HoraInicio = startTime,
+                HoraFin = endTime,
+                DuracionHoras = durationHours,
+                TipoPartido = playersType,
+                ParticipantesJson = JsonSerializer.Serialize(participantsList, JsonOptions),
+                EquipamientoAsignadoJson = JsonSerializer.Serialize(equipment, JsonOptions),
+                CostoCancha = courtCost,
+                CostoEquipamiento = equipmentCost,
+                CostoTotal = totalCost,
+                SenaPagada = depositPaid,
+                ReciboSenaId = receiptId,
+                MetodoPagoSena = paymentMethod,
+                SaldoPendiente = remainingBalance,
+                SaldoAbonado = false,
+                ReciboFinalId = null,
+                Estado = "confirmada",
+                DetalleCancelacionJson = null,
+                CreatedAt = nowUtc,
+                UpdatedAt = nowUtc
+            };
+
+            var receiptItems = new List<ReceiptItemDto>
+            {
+                new() { Description = $"Alquiler {durationHours:0.##}hs {courtDisplayName}", Amount = courtCost },
+                new() { Description = "Equipamiento incluido (Red, Pelotas, Raquetas)", Amount = equipmentCost },
+                new() { Description = "Total Turno", Amount = totalCost },
+                new() { Description = "Cobro de Seña 50% para Confirmación", Amount = depositPaid }
+            };
+
+            var pagoSena = new Pago
+            {
+                Id = receiptId,
+                ReservaId = reservationId,
+                UsuarioId = usuario.Id,
+                ClienteNombre = leadName,
+                ClienteDni = leadDni,
+                Concepto = $"Seña 50% Obligatoria - {courtDisplayName}",
+                TipoPago = "sena_50",
+                MedioPago = paymentMethod,
+                MontoTotal = depositPaid,
+                Estado = "completado",
+                MpPreferenceId = mpPreference.PreferenceId,
+                MpStatus = mpPreference.Status,
+                QrData = mpPreference.QrData,
+                PaymentUrl = !string.IsNullOrWhiteSpace(mpPreference.SandboxInitPoint)
+                    ? mpPreference.SandboxInitPoint
+                    : mpPreference.InitPoint,
+                ItemsJson = JsonSerializer.Serialize(receiptItems, JsonOptions),
+                CajeroNombre = "Cobro Digital Online",
+                FechaPago = nowUtc,
+                CreatedAt = nowUtc,
+                UpdatedAt = nowUtc
+            };
+
+            usuario.TotalReservas += 1;
+            usuario.UpdatedAt = nowUtc;
+
+            _dbContext.Reservas.Add(reserva);
+            _dbContext.Pagos.Add(pagoSena);
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return new CreateReservationResultDto
+            {
+                Data = MapToResponseDto(reserva),
+                Receipt = MapPagoToReceiptDto(pagoSena, receiptItems),
+                PaymentPreference = mpPreference
+            };
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<ReservationResponseDto>> GetReservationsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (!_currentUser.IsStaff && !_currentUser.IsMember)
+        {
+            throw DomainException.Forbidden("Esta sección es solo para socios y personal del club.");
+        }
+
+        IQueryable<Reserva> query = _dbContext.Reservas.AsNoTracking();
+
+        if (!_currentUser.IsStaff)
+        {
+            var dni = _currentUser.Dni;
+            var userId = _currentUser.UserId;
+            query = query.Where(r => r.TitularDni == dni || r.UsuarioId == userId);
+        }
+
+        var list = await query
+            .OrderByDescending(r => r.Fecha)
+            .ThenByDescending(r => r.HoraInicio)
+            .ToListAsync(cancellationToken);
+
+        return list.Select(MapToResponseDto).ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<ReservationOccupancyDto>> GetOccupancyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (!_currentUser.IsStaff && !_currentUser.IsMember)
+        {
+            throw DomainException.Forbidden("Esta sección es solo para socios y personal del club.");
+        }
+
+        var activeReservations = await _dbContext.Reservas
+            .AsNoTracking()
+            .Where(r => r.Estado != "cancelada")
+            .OrderBy(r => r.Fecha)
+            .ThenBy(r => r.HoraInicio)
+            .ToListAsync(cancellationToken);
+
+        return activeReservations
+            .Select(r => new ReservationOccupancyDto
+            {
+                Id = r.Id,
+                CourtId = r.CanchaId,
+                CourtName = r.NombreCancha,
+                Date = r.Fecha.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                StartTime = r.HoraInicio.ToString("HH:mm", CultureInfo.InvariantCulture),
+                EndTime = r.HoraFin.ToString("HH:mm", CultureInfo.InvariantCulture),
+                DurationHours = r.DuracionHoras,
+                Status = r.Estado
+            })
+            .ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task<ReservationResponseDto> UpdateReservationAsync(
+        string id,
+        UpdateReservationRequestDto request,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_currentUser.IsStaff)
+        {
+            throw DomainException.Forbidden("Esta acción es solo para el personal del club.");
+        }
+
+        var existing = await _dbContext.Reservas
+            .FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
+            ?? throw DomainException.NotFound($"La reserva '{id}' no existe.");
+
+        var courtChanged = !string.IsNullOrWhiteSpace(request.CourtId) && request.CourtId != existing.CanchaId;
+        var dateChanged = !string.IsNullOrWhiteSpace(request.Date)
+                          && request.Date != existing.Fecha.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var startChanged = !string.IsNullOrWhiteSpace(request.StartTime)
+                           && request.StartTime != existing.HoraInicio.ToString("HH:mm", CultureInfo.InvariantCulture);
+        var durationChanged = request.DurationHours.HasValue && request.DurationHours.Value != existing.DuracionHoras;
+
+        var nextDate = existing.Fecha;
+        if (dateChanged)
+        {
+            if (!DateOnly.TryParseExact(request.Date!, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out nextDate))
+            {
+                throw DomainException.BadRequest("La fecha de la reserva no es válida (formato AAAA-MM-DD).");
+            }
+            ValidateBookingWindow(nextDate);
+        }
+
+        var nextStart = existing.HoraInicio;
+        if (startChanged && !TimeOnly.TryParseExact(request.StartTime!, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out nextStart))
+        {
+            throw DomainException.BadRequest("La hora de inicio no es válida (formato HH:mm).");
+        }
+
+        var nextDuration = request.DurationHours.HasValue && request.DurationHours.Value > 0
+            ? Math.Round(request.DurationHours.Value, 2)
+            : existing.DuracionHoras;
+
+        if (nextDuration <= 0m || nextDuration > 2.00m)
+        {
+            throw DomainException.BadRequest("La duración máxima permitida por reserva es de 2 horas.");
+        }
+
+        var nextEnd = existing.HoraFin;
+        if (startChanged || durationChanged)
+        {
+            var totalMin = nextStart.Hour * 60 + nextStart.Minute + (int)Math.Round(nextDuration * 60m);
+            nextEnd = new TimeOnly(totalMin / 60, totalMin % 60);
+        }
+
+        var targetCourtId = courtChanged ? request.CourtId! : existing.CanchaId;
+        var cancha = await _dbContext.Canchas
+            .FirstOrDefaultAsync(c => c.Id == targetCourtId, cancellationToken);
+
+        if (cancha is not null)
+        {
+            if (courtChanged && string.Equals(cancha.Estado, "mantenimiento", StringComparison.OrdinalIgnoreCase))
+            {
+                throw DomainException.Conflict("La cancha seleccionada está bloqueada por mantenimiento (RD06).");
+            }
+
+            if (courtChanged || dateChanged || startChanged || durationChanged)
+            {
+                var blockReason = ValidateSlotBlock(cancha.DisponibilidadJson, nextDate, nextStart, nextDuration);
+                if (!string.IsNullOrEmpty(blockReason))
+                {
+                    throw DomainException.Conflict($"La cancha no admite reservas en ese turno: {blockReason} (RD06).");
+                }
+
+                var hasOverlap = await _dbContext.Reservas.AnyAsync(
+                    r => r.CanchaId == targetCourtId
+                         && r.Fecha == nextDate
+                         && r.Id != existing.Id
+                         && (r.Estado == "pendiente_pago" || r.Estado == "confirmada")
+                         && nextStart < r.HoraFin
+                         && nextEnd > r.HoraInicio,
+                    cancellationToken);
+
+                if (hasOverlap)
+                {
+                    throw DomainException.Conflict("Existe solapamiento horario con otra reserva activa en esa cancha (RD06).");
+                }
+            }
+
+            if (courtChanged || durationChanged)
+            {
+                if (courtChanged)
+                {
+                    existing.CanchaId = cancha.Id;
+                    existing.NombreCancha = $"{cancha.Nombre} ({cancha.Superficie})";
+                    existing.Superficie = cancha.Superficie;
+                }
+
+                var equipmentCost = request.EquipmentCost ?? existing.CostoEquipamiento;
+                var courtCost = Math.Round(cancha.PrecioPorHora * nextDuration, 2, MidpointRounding.AwayFromZero);
+                var totalCost = courtCost + equipmentCost;
+
+                existing.CostoEquipamiento = equipmentCost;
+                existing.CostoCancha = courtCost;
+                existing.CostoTotal = totalCost;
+                existing.SaldoPendiente = Math.Max(totalCost - existing.SenaPagada, 0m);
+            }
+        }
+
+        existing.Fecha = nextDate;
+        existing.HoraInicio = nextStart;
+        existing.HoraFin = nextEnd;
+        existing.DuracionHoras = nextDuration;
+
+        if (!string.IsNullOrWhiteSpace(request.PlayersType))
+        {
+            existing.TipoPartido = request.PlayersType.Trim().ToLowerInvariant();
+        }
+
+        if (request.Participants is not null)
+        {
+            existing.ParticipantesJson = JsonSerializer.Serialize(request.Participants, JsonOptions);
+        }
+
+        if (request.EquipmentAssigned is not null)
+        {
+            existing.EquipamientoAsignadoJson = JsonSerializer.Serialize(request.EquipmentAssigned, JsonOptions);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Status))
+        {
+            existing.Estado = request.Status.Trim();
+        }
+
+        existing.UpdatedAt = DateTimeOffset.UtcNow;
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        return MapToResponseDto(existing);
+    }
+
+    /// <inheritdoc />
+    public async Task<ReservationResponseDto> PayRemainingBalanceAsync(
+        string id,
+        PayRemainingRequestDto request,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_currentUser.IsStaff)
+        {
+            throw DomainException.Forbidden("Esta acción es solo para el personal del club.");
+        }
+
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
+
+        try
+        {
+            var reserva = await _dbContext.Reservas
+                .FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
+                ?? throw DomainException.NotFound($"La reserva '{id}' no existe.");
+
+            if (reserva.SaldoAbonado)
+            {
+                throw DomainException.Conflict("El saldo de esta reserva ya fue liquidado.");
+            }
+
+            if (string.Equals(reserva.Estado, "cancelada", StringComparison.OrdinalIgnoreCase))
+            {
+                throw DomainException.Conflict("La reserva está cancelada.");
+            }
+
+            var remainingAmount = reserva.SaldoPendiente > 0
+                ? reserva.SaldoPendiente
+                : Math.Round(reserva.CostoTotal - reserva.SenaPagada, 2, MidpointRounding.AwayFromZero);
+
+            var (leadName, leadDni) = ExtractLeadClient(reserva);
+            var finalReceiptId = $"REC-FINAL-{Random.Shared.Next(1000, 9999)}";
+            var previousStatus = reserva.Estado;
+
+            var mpPreference = await _mercadoPagoGateway.CreateRemainingBalancePreferenceAsync(
+                new PaymentPreferenceRequestDto
+                {
+                    ExternalReference = reserva.Id,
+                    Title = $"Liquidación Final 50% Saldo - {reserva.NombreCancha}",
+                    Description = $"Saldo restante 50% de turno finalizado ({reserva.Id})",
+                    Amount = remainingAmount,
+                    PayerName = leadName,
+                    PayerDni = leadDni
+                },
+                cancellationToken);
+
+            // Restituir stock automáticamente al finalizar el turno
+            if (_clubConfig.UseApplicationLayerStockManagement
+                && (previousStatus == "pendiente_pago" || previousStatus == "confirmada"))
+            {
+                await RestoreStockForReservationAsync(reserva, cancellationToken);
+            }
+
+            var nowUtc = DateTimeOffset.UtcNow;
+            var paymentMethod = NormalizePaymentMethod(request.PaymentMethod);
+
+            reserva.SaldoAbonado = true;
+            reserva.SaldoPendiente = 0m;
+            reserva.Estado = "finalizada";
+            reserva.ReciboFinalId = finalReceiptId;
+            reserva.UpdatedAt = nowUtc;
+
+            var receiptItems = new List<ReceiptItemDto>
+            {
+                new() { Description = "Saldo restante 50% de turno finalizado", Amount = remainingAmount }
+            };
+
+            var pagoFinal = new Pago
+            {
+                Id = finalReceiptId,
+                ReservaId = reserva.Id,
+                UsuarioId = reserva.UsuarioId,
+                ClienteNombre = leadName,
+                ClienteDni = leadDni,
+                Concepto = $"Liquidación Final 50% Saldo - {reserva.NombreCancha}",
+                TipoPago = "saldo_50",
+                MedioPago = paymentMethod,
+                MontoTotal = Math.Max(remainingAmount, 0.01m),
+                Estado = "completado",
+                MpPreferenceId = mpPreference.PreferenceId,
+                MpStatus = mpPreference.Status,
+                QrData = mpPreference.QrData,
+                PaymentUrl = !string.IsNullOrWhiteSpace(mpPreference.SandboxInitPoint)
+                    ? mpPreference.SandboxInitPoint
+                    : mpPreference.InitPoint,
+                ItemsJson = JsonSerializer.Serialize(receiptItems, JsonOptions),
+                CajeroNombre = "Recepción del Club",
+                FechaPago = nowUtc,
+                CreatedAt = nowUtc,
+                UpdatedAt = nowUtc
+            };
+
+            _dbContext.Pagos.Add(pagoFinal);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return MapToResponseDto(reserva);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<CancelReservationResponseDto> CancelReservationAsync(
+        string id,
+        CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
+
+        try
+        {
+            var reserva = await _dbContext.Reservas
+                .FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
+                ?? throw DomainException.NotFound($"La reserva '{id}' no existe.");
+
+            if (!_currentUser.IsStaff && !OwnsReservation(reserva))
+            {
+                throw DomainException.Forbidden("La reserva no es tuya.");
+            }
+
+            if (string.Equals(reserva.Estado, "cancelada", StringComparison.OrdinalIgnoreCase))
+            {
+                throw DomainException.Conflict("La reserva ya está cancelada.");
+            }
+
+            var previousStatus = reserva.Estado;
+
+            // RD02-RD04: Cálculo de horas hasta el inicio de la reserva
+            var startDateTime = reserva.Fecha.ToDateTime(reserva.HoraInicio, DateTimeKind.Local);
+            var hoursUntilStart = Math.Round((startDateTime - DateTime.Now).TotalHours * 10.0) / 10.0;
+
+            var freeHours = _clubConfig.FreeCancellationHours;
+            var retentionPct = _clubConfig.LateCancellationRetentionPercent;
+            var isWithinFreeWindow = hoursUntilStart >= freeHours;
+
+            var policyText = isWithinFreeWindow
+                ? $"Cancelación anticipada (>={freeHours:0.##}hs): Reembolso de seña según política."
+                : $"Cancelación tardía (<{freeHours:0.##}hs): Se aplica retención del {retentionPct:0.##}% de seña por costo operativo.";
+
+            var nowUtc = DateTimeOffset.UtcNow;
+            var cancellationDetails = new CancellationDetailsDto
+            {
+                CancelledAt = nowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
+                HoursInAdvance = hoursUntilStart,
+                PolicyApplied = policyText
+            };
+
+            // Restitución de stock asignado al cancelar
+            if (_clubConfig.UseApplicationLayerStockManagement
+                && (previousStatus == "pendiente_pago" || previousStatus == "confirmada"))
+            {
+                await RestoreStockForReservationAsync(reserva, cancellationToken);
+            }
+
+            reserva.Estado = "cancelada";
+            reserva.DetalleCancelacionJson = JsonSerializer.Serialize(cancellationDetails, JsonOptions);
+            reserva.UpdatedAt = nowUtc;
+
+            var (leadName, leadDni) = ExtractLeadClient(reserva);
+            var deposit = reserva.SenaPagada;
+            var refundCount = await _dbContext.Pagos.CountAsync(p => p.TipoPago == "reembolso", cancellationToken);
+            var refundId = $"RMB-{nowUtc.Year}-{refundCount + 9:D4}";
+            var stamp = nowUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+
+            ReceiptResponseDto? penaltyReceiptDto = null;
+            RefundResponseDto refundDto;
+
+            if (isWithinFreeWindow)
+            {
+                refundDto = new RefundResponseDto
+                {
+                    Id = refundId,
+                    ClientName = leadName,
+                    ClientDni = leadDni,
+                    RelatedReservationId = reserva.Id,
+                    RelatedReceiptId = reserva.ReciboSenaId,
+                    Reason = $"Cancelación de reserva {reserva.Id} con {hoursUntilStart:0.#} hs de antelación (dentro del plazo reglamentario).",
+                    RefundType = "total",
+                    OriginalAmount = deposit,
+                    RefundAmount = deposit,
+                    RefundMethod = "Devolución a " + (reserva.MetodoPagoSena ?? "medio de pago original"),
+                    Date = stamp,
+                    ProcessedBy = "Sistema de Reservas"
+                };
+
+                _dbContext.Pagos.Add(new Pago
+                {
+                    Id = refundId,
+                    ReservaId = reserva.Id,
+                    UsuarioId = reserva.UsuarioId,
+                    ClienteNombre = leadName,
+                    ClienteDni = leadDni,
+                    Concepto = refundDto.Reason,
+                    TipoPago = "reembolso",
+                    MedioPago = NormalizePaymentMethod(reserva.MetodoPagoSena),
+                    MontoTotal = Math.Max(deposit, 0.01m),
+                    Estado = "reembolsado",
+                    ItemsJson = JsonSerializer.Serialize(
+                        new List<ReceiptItemDto>
+                        {
+                            new() { Description = "Reintegro total de seña (cancelación en término)", Amount = deposit }
+                        },
+                        JsonOptions),
+                    CajeroNombre = "Sistema de Reservas",
+                    FechaPago = nowUtc,
+                    CreatedAt = nowUtc,
+                    UpdatedAt = nowUtc
+                });
+            }
+            else
+            {
+                var retained = Math.Round(deposit * (retentionPct / 100m), 2, MidpointRounding.AwayFromZero);
+                var refundedCredit = Math.Max(deposit - retained, 0m);
+                var penaltyId = $"REC-CARGO-{Random.Shared.Next(1000, 9999)}";
+
+                var penaltyItems = new List<ReceiptItemDto>
+                {
+                    new() { Description = $"Seña abonada ({reserva.Id})", Amount = deposit },
+                    new() { Description = $"Retención {retentionPct:0.##}% por cancelación con menos de {freeHours:0.##} hs", Amount = retained },
+                    new() { Description = "Saldo reintegrado como crédito en cuenta", Amount = refundedCredit }
+                };
+
+                var pagoCargo = new Pago
+                {
+                    Id = penaltyId,
+                    ReservaId = reserva.Id,
+                    UsuarioId = reserva.UsuarioId,
+                    ClienteNombre = leadName,
+                    ClienteDni = leadDni,
+                    Concepto = $"Cargo por cancelación fuera de plazo - {reserva.NombreCancha}",
+                    TipoPago = "cargo_cancelacion",
+                    MedioPago = "Retención sobre seña",
+                    MontoTotal = Math.Max(retained, 0.01m),
+                    Estado = "completado",
+                    ItemsJson = JsonSerializer.Serialize(penaltyItems, JsonOptions),
+                    CajeroNombre = "Sistema de Reservas",
+                    FechaPago = nowUtc,
+                    CreatedAt = nowUtc,
+                    UpdatedAt = nowUtc
+                };
+
+                _dbContext.Pagos.Add(pagoCargo);
+                penaltyReceiptDto = MapPagoToReceiptDto(pagoCargo, penaltyItems);
+
+                refundDto = new RefundResponseDto
+                {
+                    Id = refundId,
+                    ClientName = leadName,
+                    ClientDni = leadDni,
+                    RelatedReservationId = reserva.Id,
+                    RelatedReceiptId = reserva.ReciboSenaId,
+                    Reason = $"Cancelación fuera de plazo ({hoursUntilStart:0.#} hs). Se retiene el {retentionPct:0.##}% de la seña y se reintegra el resto.",
+                    RefundType = "parcial",
+                    OriginalAmount = deposit,
+                    RefundAmount = refundedCredit,
+                    RefundMethod = "Crédito en cuenta de socio",
+                    Date = stamp,
+                    ProcessedBy = "Sistema de Reservas"
+                };
+
+                if (refundedCredit > 0)
+                {
+                    _dbContext.Pagos.Add(new Pago
+                    {
+                        Id = refundId,
+                        ReservaId = reserva.Id,
+                        UsuarioId = reserva.UsuarioId,
+                        ClienteNombre = leadName,
+                        ClienteDni = leadDni,
+                        Concepto = refundDto.Reason,
+                        TipoPago = "reembolso",
+                        MedioPago = "Crédito en cuenta de socio",
+                        MontoTotal = refundedCredit,
+                        Estado = "reembolsado",
+                        ItemsJson = JsonSerializer.Serialize(
+                            new List<ReceiptItemDto>
+                            {
+                                new() { Description = "Reintegro parcial como crédito en cuenta de socio", Amount = refundedCredit }
+                            },
+                            JsonOptions),
+                        CajeroNombre = "Sistema de Reservas",
+                        FechaPago = nowUtc,
+                        CreatedAt = nowUtc,
+                        UpdatedAt = nowUtc
+                    });
+                }
+            }
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return new CancelReservationResponseDto
+            {
+                Data = MapToResponseDto(reserva),
+                IsWithinFreeWindow = isWithinFreeWindow,
+                Refund = refundDto,
+                PenaltyReceipt = penaltyReceiptDto
+            };
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    // =========================================================================
+    // MÉTODOS PRIVADOS DE REGLAS DE DOMINIO (Migrados desde business.go)
+    // =========================================================================
+
+    private void ValidateBookingWindow(DateOnly date)
+    {
+        var today = DateOnly.FromDateTime(DateTime.Now);
+        if (date < today)
+        {
+            throw DomainException.BadRequest($"No se permiten reservas en fechas pasadas ({date:yyyy-MM-dd}) (RD05).");
+        }
+
+        var maxDays = _clubConfig.MaxAdvanceBookingDays > 0 ? _clubConfig.MaxAdvanceBookingDays : 30;
+        var limit = today.AddDays(maxDays);
+        if (date > limit)
+        {
+            throw DomainException.BadRequest(
+                $"Las reservas se pueden hacer con hasta {maxDays} días de antelación (hasta el {limit:yyyy-MM-dd}) (RD05).");
+        }
+    }
+
+    private static string ValidateSlotBlock(
+        string availabilityJson,
+        DateOnly date,
+        TimeOnly startTime,
+        decimal durationHours)
+    {
+        if (string.IsNullOrWhiteSpace(availabilityJson))
+        {
+            return string.Empty;
+        }
+
+        using var doc = JsonDocument.Parse(availabilityJson);
+        var root = doc.RootElement;
+
+        var dayName = SpanishWeekDays[(int)date.DayOfWeek];
+        if (root.TryGetProperty("days", out var daysElement) && daysElement.ValueKind == JsonValueKind.Array)
+        {
+            var attendsDay = daysElement.EnumerateArray()
+                .Any(d => string.Equals(d.GetString(), dayName, StringComparison.OrdinalIgnoreCase));
+            if (!attendsDay)
+            {
+                return $"sin atención el día {dayName}";
+            }
+        }
+
+        var openTimeStr = root.TryGetProperty("openTime", out var openEl) ? openEl.GetString() ?? "08:00" : "08:00";
+        var closeTimeStr = root.TryGetProperty("closeTime", out var closeEl) ? closeEl.GetString() ?? "22:00" : "22:00";
+
+        var fromMinutes = startTime.Hour * 60 + startTime.Minute;
+        var toMinutes = fromMinutes + (int)Math.Round(durationHours * 60m);
+
+        var openMinutes = ParseHhMmToMinutes(openTimeStr, 8 * 60);
+        var closeMinutes = ParseHhMmToMinutes(closeTimeStr, 22 * 60);
+
+        if (fromMinutes < openMinutes || toMinutes > closeMinutes)
+        {
+            return $"fuera de horario ({openTimeStr} a {closeTimeStr})";
+        }
+
+        if (root.TryGetProperty("blockedRanges", out var blockedEl) && blockedEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in blockedEl.EnumerateArray())
+            {
+                var blockedDay = item.TryGetProperty("day", out var dEl) ? dEl.GetString() : null;
+                if (!string.Equals(blockedDay, dayName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var bFrom = item.TryGetProperty("from", out var fEl) ? ParseHhMmToMinutes(fEl.GetString(), 0) : 0;
+                var bTo = item.TryGetProperty("to", out var tEl) ? ParseHhMmToMinutes(tEl.GetString(), 0) : 0;
+
+                if (fromMinutes < bTo && toMinutes > bFrom)
+                {
+                    var reason = item.TryGetProperty("reason", out var rEl) ? rEl.GetString() : null;
+                    return !string.IsNullOrWhiteSpace(reason)
+                        ? reason!
+                        : $"bloqueada de {item.GetProperty("from").GetString()} a {item.GetProperty("to").GetString()}";
+                }
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static int ParseHhMmToMinutes(string? hhmm, int fallback)
+    {
+        if (string.IsNullOrWhiteSpace(hhmm))
+        {
+            return fallback;
+        }
+
+        var parts = hhmm.Trim().Split(':');
+        if (parts.Length < 2
+            || !int.TryParse(parts[0], out var h)
+            || !int.TryParse(parts[1], out var m))
+        {
+            return fallback;
+        }
+
+        return h * 60 + m;
+    }
+
+    private static void ApplyStockDeduction(StockItem item, int quantity)
+    {
+        item.StockDisponible -= quantity;
+        item.StockEnUso += quantity;
+        item.Estado = item.StockDisponible <= 0 ? "agotado" : "disponible";
+        item.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    private async Task RestoreStockForReservationAsync(Reserva reserva, CancellationToken cancellationToken)
+    {
+        var equipment = DeserializeOrDefault(reserva.EquipamientoAsignadoJson, new EquipmentAssignedDto());
+        var reqNets = Math.Max(equipment.Nets, 1);
+        var reqBalls = Math.Max(equipment.BallTubes, 1);
+        var reqRackets = Math.Max(equipment.Rackets, 1);
+
+        var requiredCategories = new[] { "Redes", "Pelotas", "Raquetas" };
+        var stockItems = await _dbContext.StockItems
+            .Where(s => requiredCategories.Contains(s.Categoria))
+            .OrderBy(s => s.Categoria)
+            .ThenBy(s => s.Id)
+            .ToListAsync(cancellationToken);
+
+        foreach (var item in stockItems)
+        {
+            var qtyToRestore = item.Categoria switch
+            {
+                "Redes" => reqNets,
+                "Pelotas" => reqBalls,
+                "Raquetas" => reqRackets,
+                _ => 0
+            };
+
+            if (qtyToRestore <= 0)
+            {
+                continue;
+            }
+
+            item.StockEnUso = Math.Max(0, item.StockEnUso - qtyToRestore);
+            item.StockDisponible = item.StockTotal - item.StockEnUso;
+            item.Estado = item.StockDisponible <= 0 ? "agotado" : "disponible";
+            item.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private async Task<string> GenerateNextReservationIdAsync(CancellationToken cancellationToken)
+    {
+        var year = DateTime.UtcNow.Year;
+        var count = await _dbContext.Reservas.CountAsync(cancellationToken);
+        var baseId = $"RES-{year}-{count + 1:D3}";
+        var candidate = baseId;
+        var suffix = 1;
+
+        while (await _dbContext.Reservas.AnyAsync(r => r.Id == candidate, cancellationToken))
+        {
+            suffix++;
+            candidate = $"{baseId}-{suffix}";
+        }
+
+        return candidate;
+    }
+
+    private async Task<Usuario> ResolveReservationUserAsync(string leadDni, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(_currentUser.UserId))
+        {
+            var byId = await _dbContext.Usuarios
+                .FirstOrDefaultAsync(u => u.Id == _currentUser.UserId, cancellationToken);
+            if (byId is not null)
+            {
+                return byId;
+            }
+        }
+
+        if (_currentUser.AuthUserId.HasValue)
+        {
+            var byAuthId = await _dbContext.Usuarios
+                .FirstOrDefaultAsync(u => u.AuthUserId == _currentUser.AuthUserId.Value, cancellationToken);
+            if (byAuthId is not null)
+            {
+                return byAuthId;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(leadDni))
+        {
+            var byDni = await _dbContext.Usuarios
+                .FirstOrDefaultAsync(u => u.Dni == leadDni, cancellationToken);
+            if (byDni is not null)
+            {
+                return byDni;
+            }
+        }
+
+        var firstClient = await _dbContext.Usuarios
+            .OrderBy(u => u.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return firstClient ?? throw DomainException.BadRequest("No se encontró un perfil de socio válido para asociar la reserva.");
+    }
+
+    private bool OwnsReservation(Reserva reserva)
+    {
+        if (!string.IsNullOrWhiteSpace(_currentUser.UserId)
+            && string.Equals(reserva.UsuarioId, _currentUser.UserId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (_currentUser.IsMeByDni(reserva.TitularDni))
+        {
+            return true;
+        }
+
+        var participants = DeserializeOrDefault(reserva.ParticipantesJson, new List<ReservationParticipantDto>());
+        return participants.Count > 0 && _currentUser.IsMeByDni(participants[0].Dni);
+    }
+
+    private static (string Name, string Dni) ExtractLeadClient(Reserva reserva)
+    {
+        var participants = DeserializeOrDefault(reserva.ParticipantesJson, new List<ReservationParticipantDto>());
+        var lead = participants.FirstOrDefault();
+        var name = !string.IsNullOrWhiteSpace(lead?.Name) ? lead!.Name : "Socio Tenis Ahora";
+        var dni = !string.IsNullOrWhiteSpace(lead?.Dni)
+            ? lead!.Dni
+            : (!string.IsNullOrWhiteSpace(reserva.TitularDni) ? reserva.TitularDni : "00.000.000");
+
+        return (name, dni);
+    }
+
+    private static string NormalizePaymentMethod(string? method)
+    {
+        var validMethods = new[]
+        {
+            "Mercado Pago",
+            "Mercado Pago (QR)",
+            "Tarjeta de Débito",
+            "Tarjeta de Crédito",
+            "Billetera Virtual",
+            "Retención sobre seña",
+            "Crédito en cuenta de socio"
+        };
+
+        if (!string.IsNullOrWhiteSpace(method))
+        {
+            var matched = validMethods.FirstOrDefault(m => string.Equals(m, method.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (matched is not null)
+            {
+                return matched;
+            }
+        }
+
+        return "Mercado Pago (QR)";
+    }
+
+    private static ReservationResponseDto MapToResponseDto(Reserva r)
+    {
+        var participants = DeserializeOrDefault(r.ParticipantesJson, new List<ReservationParticipantDto>());
+        var equipment = DeserializeOrDefault(r.EquipamientoAsignadoJson, new EquipmentAssignedDto());
+        var cancellation = !string.IsNullOrWhiteSpace(r.DetalleCancelacionJson)
+            ? DeserializeOrDefault<CancellationDetailsDto?>(r.DetalleCancelacionJson!, null)
+            : null;
+
+        return new ReservationResponseDto
+        {
+            Id = r.Id,
+            CourtId = r.CanchaId,
+            CourtName = r.NombreCancha,
+            SurfaceType = r.Superficie,
+            Date = r.Fecha.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            StartTime = r.HoraInicio.ToString("HH:mm", CultureInfo.InvariantCulture),
+            EndTime = r.HoraFin.ToString("HH:mm", CultureInfo.InvariantCulture),
+            DurationHours = r.DuracionHoras,
+            PlayersType = r.TipoPartido,
+            Participants = participants,
+            EquipmentAssigned = equipment,
+            CourtCost = r.CostoCancha,
+            EquipmentCost = r.CostoEquipamiento,
+            TotalCost = r.CostoTotal,
+            DepositPaid = r.SenaPagada,
+            DepositReceiptNumber = r.ReciboSenaId,
+            DepositPaymentMethod = r.MetodoPagoSena,
+            RemainingBalance = r.SaldoPendiente,
+            RemainingPaid = r.SaldoAbonado,
+            FinalReceiptNumber = r.ReciboFinalId,
+            Status = r.Estado,
+            CreatedAt = r.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
+            UpdatedAt = r.UpdatedAt.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
+            CancellationDetails = cancellation
+        };
+    }
+
+    private static ReceiptResponseDto MapPagoToReceiptDto(Pago pago, List<ReceiptItemDto> items)
+    {
+        return new ReceiptResponseDto
+        {
+            Id = pago.Id,
+            ReservationId = pago.ReservaId,
+            ClientName = pago.ClienteNombre,
+            ClientDni = pago.ClienteDni,
+            Concept = pago.Concepto,
+            Items = items,
+            TotalPaid = pago.MontoTotal,
+            PaymentMethod = pago.MedioPago,
+            Status = pago.Estado,
+            Date = pago.FechaPago.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),
+            QrData = pago.QrData,
+            PaymentUrl = pago.PaymentUrl,
+            MpPreferenceId = pago.MpPreferenceId,
+            CashierName = pago.CajeroNombre
+        };
+    }
+
+    private static T DeserializeOrDefault<T>(string? json, T defaultValue)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return defaultValue;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<T>(json, JsonOptions) ?? defaultValue;
+        }
+        catch
+        {
+            return defaultValue;
+        }
+    }
+}

@@ -1,0 +1,455 @@
+-- =============================================================================
+-- PROYECTO: Tenis Ahora (IEEE SRS-830)
+-- ARCHIVO: 003_seed_initial_data.sql
+-- DESCRIPCIÓN: Carga idempotente (ON CONFLICT DO NOTHING) de catálogos y datos
+--              iniciales tomados de la referencia oficial seed.json.
+-- MOTOR: Supabase (PostgreSQL 15+)
+-- =============================================================================
+
+BEGIN;
+
+-- -----------------------------------------------------------------------------
+-- 1. TIPOS DE CANCHA (ct-ladrillo, ct-cemento, ct-pasto)
+-- -----------------------------------------------------------------------------
+INSERT INTO public.tipos_cancha (
+    id,
+    nombre,
+    etiqueta,
+    descripcion,
+    velocidad,
+    precio_base_hora,
+    frecuencia_mantenimiento,
+    max_alumnos_por_clase,
+    activo
+) VALUES
+(
+    'ct-ladrillo',
+    'Ladrillo',
+    'Polvo de ladrillo',
+    'Superficie lenta de arcilla roja. Ideal para peloteo largo y juego de fondo.',
+    'Lenta',
+    4800.00,
+    'Diaria (riego y pasada de alfombra)',
+    30,
+    TRUE
+),
+(
+    'ct-cemento',
+    'Cemento',
+    'Cemento',
+    'Superficie dura de pique medio-rápido. Bajo mantenimiento.',
+    'Media-rápida',
+    4200.00,
+    'Semanal (barrido y revisión de fisuras)',
+    20,
+    TRUE
+),
+(
+    'ct-pasto',
+    'Pasto',
+    'Césped natural',
+    'Superficie rápida de pique bajo. No se usa en días de lluvia.',
+    'Rápida',
+    6500.00,
+    'Diaria (corte, riego y marcado de líneas)',
+    12,
+    TRUE
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- 2. CANCHAS (cancha-1 a cancha-5)
+-- -----------------------------------------------------------------------------
+INSERT INTO public.canchas (
+    id,
+    nombre,
+    tipo_cancha_id,
+    superficie,
+    capacidad,
+    precio_por_hora,
+    estado,
+    descripcion,
+    notas_mantenimiento,
+    disponibilidad,
+    foto_url
+) VALUES
+(
+    'cancha-1',
+    'Cancha 1 - Lionel Messi',
+    'ct-ladrillo',
+    'Ladrillo',
+    4,
+    4800.00,
+    'disponible',
+    'Cancha central de polvo de ladrillo, con tribuna.',
+    '',
+    '{"days":["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"],"openTime":"08:00","closeTime":"22:00","slotMinutes":60,"blockedRanges":[],"notes":"Horario corrido. Iluminación artificial desde las 19:00."}'::jsonb,
+    'https://images.unsplash.com/photo-1595435934249-5df7ed86e1c0?auto=format&fit=crop&w=600&q=80'
+),
+(
+    'cancha-2',
+    'Cancha 2 - Dibu Martínez',
+    'ct-ladrillo',
+    'Ladrillo',
+    4,
+    4800.00,
+    'disponible',
+    'Polvo de ladrillo, ideal para singles y dobles.',
+    '',
+    '{"days":["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"],"openTime":"08:00","closeTime":"22:00","slotMinutes":60,"blockedRanges":[],"notes":"Horario corrido. Iluminación artificial desde las 19:00."}'::jsonb,
+    'https://images.unsplash.com/photo-1554068865-24cecd4e34b8?auto=format&fit=crop&w=600&q=80'
+),
+(
+    'cancha-3',
+    'Cancha 3 - Ángel Di María',
+    'ct-cemento',
+    'Cemento',
+    4,
+    4200.00,
+    'disponible',
+    'Superficie dura de pique rápido y uniforme.',
+    '',
+    '{"days":["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"],"openTime":"08:00","closeTime":"22:00","slotMinutes":60,"blockedRanges":[],"notes":"Horario corrido. Iluminación artificial desde las 19:00."}'::jsonb,
+    'https://images.unsplash.com/photo-1622279457486-62dcc4a431d6?auto=format&fit=crop&w=600&q=80'
+),
+(
+    'cancha-4',
+    'Cancha 4 - Julián Álvarez',
+    'ct-cemento',
+    'Cemento',
+    4,
+    4200.00,
+    'mantenimiento',
+    'Superficie dura. Actualmente en repintado de líneas.',
+    'Repintado de líneas y cambio de red hasta el 30/10.',
+    '{"days":["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"],"openTime":"08:00","closeTime":"22:00","slotMinutes":60,"blockedRanges":[],"notes":"Horario corrido. Iluminación artificial desde las 19:00."}'::jsonb,
+    'https://images.unsplash.com/photo-1560012057-4372e14c5085?auto=format&fit=crop&w=600&q=80'
+),
+(
+    'cancha-5',
+    'Cancha 5 - Rodrigo De Paul',
+    'ct-pasto',
+    'Pasto',
+    4,
+    6500.00,
+    'disponible',
+    'Césped natural, uso con calzado adecuado.',
+    '',
+    '{"days":["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"],"openTime":"08:00","closeTime":"22:00","slotMinutes":60,"blockedRanges":[],"notes":"Cerrada los días de lluvia."}'::jsonb,
+    'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=600&q=80'
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- 3. STOCK E INVENTARIO DE EQUIPAMIENTO (item-redes, item-pelotas, item-raquetas, item-grips)
+-- -----------------------------------------------------------------------------
+INSERT INTO public.stock (
+    id,
+    nombre,
+    categoria,
+    stock_total,
+    stock_en_uso,
+    stock_disponible,
+    unidad,
+    precio_unitario,
+    estado,
+    descripcion
+) VALUES
+(
+    'item-redes',
+    'Redes de tenis',
+    'Redes',
+    6,
+    5,
+    1,
+    'unidades',
+    0.00,
+    'disponible',
+    'Una por cancha habilitada; la restante es de repuesto.'
+),
+(
+    'item-pelotas',
+    'Tubos de pelotas',
+    'Pelotas',
+    40,
+    12,
+    28,
+    'tubos',
+    0.00,
+    'disponible',
+    'Tubos de 3 pelotas presurizadas. Se entrega uno por reserva.'
+),
+(
+    'item-raquetas',
+    'Raquetas de préstamo',
+    'Raquetas',
+    20,
+    6,
+    14,
+    'raquetas',
+    0.00,
+    'disponible',
+    'Raquetas para socios que no traen la propia.'
+),
+(
+    'item-grips',
+    'Overgrips',
+    'Accesorios',
+    50,
+    0,
+    50,
+    'unidades',
+    2500.00,
+    'disponible',
+    'Overgrips a la venta en recepción.'
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- 4. PROFESORES Y ENTRENADORES HABILITADOS (coach-01 a coach-03)
+-- -----------------------------------------------------------------------------
+INSERT INTO public.profesores (
+    id,
+    nombre,
+    tipo,
+    dni,
+    telefono,
+    email,
+    posee_licencia_oficial,
+    horarios_disponibles,
+    detalle_licencia
+) VALUES
+(
+    'coach-01',
+    'Gustavo Ferrari',
+    'Profesor',
+    '28.334.901',
+    '+54 11 5566-7788',
+    'profesor@tenisahora.com',
+    TRUE,
+    'Lunes a Viernes 08:00 - 13:00 y 17:00 - 21:00',
+    '{"titleName":"Profesor Nacional de Tenis","institution":"Asociación Argentina de Tenis (AAT)","licenseNumber":"AAT-PRO-41287","issueDate":"2014-08-20","expiryDate":"2028-12-31","status":"habilitado","document":{"id":"doc-seed-coach-01","name":"Titulo_Profesor_Ferrari.pdf","mimeType":"application/pdf","size":862}}'::jsonb
+),
+(
+    'coach-02',
+    'Laura Domínguez',
+    'Entrenador',
+    '31.245.678',
+    '+54 11 4433-2211',
+    'entrenador@tenisahora.com',
+    TRUE,
+    'Lunes a Jueves 14:00 - 20:00, Sábados 09:00 - 13:00',
+    '{"titleName":"Entrenadora Nacional de Tenis Nivel 1","institution":"Asociación Argentina de Tenis (AAT)","licenseNumber":"AAT-ENT-50932","issueDate":"2018-03-12","expiryDate":"2029-03-31","status":"habilitado","document":{"id":"doc-seed-coach-02","name":"Certificado_Entrenadora_Dominguez.pdf","mimeType":"application/pdf","size":873}}'::jsonb
+),
+(
+    'coach-03',
+    'Diego Paredes',
+    'Entrenador',
+    '29.871.340',
+    '+54 11 6677-9922',
+    'diego.paredes@tenisahora.com',
+    TRUE,
+    'Martes a Sábados 10:00 - 18:00',
+    '{"titleName":"Entrenador Nacional de Tenis Nivel 2","institution":"Asociación Argentina de Tenis (AAT)","licenseNumber":"AAT-ENT-47710","issueDate":"2016-09-10","expiryDate":"2027-12-31","status":"habilitado","document":{"id":"doc-seed-coach-03","name":"Certificado_Entrenador_Paredes.pdf","mimeType":"application/pdf","size":870}}'::jsonb
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- 5. USUARIOS PRINCIPALES (usr-admin, usr-01, usr-coach-01, usr-coach-02, usr-coach-03)
+-- -----------------------------------------------------------------------------
+INSERT INTO public.usuarios (
+    id,
+    auth_user_id,
+    nombre,
+    dni,
+    telefono,
+    email,
+    direccion,
+    rol,
+    profesor_id,
+    numero_socio,
+    socio_desde,
+    descuentos_activos,
+    total_reservas
+) VALUES
+(
+    'usr-admin',
+    NULL,
+    'Carolina Peralta',
+    '30.512.774',
+    '+54 11 4253-8800',
+    'admin@tenisahora.com',
+    'Sede Club Tenis Ahora, Quilmes',
+    'admin',
+    NULL,
+    'ADM-001',
+    '2022-01-01',
+    '[]'::jsonb,
+    0
+),
+(
+    'usr-01',
+    NULL,
+    'Juan Sánchez',
+    '35.678.912',
+    '+54 11 5234-7781',
+    'socio@tenisahora.com',
+    'Mitre 1240, Quilmes',
+    'client',
+    NULL,
+    'TA-1001',
+    '2024-03-10',
+    '["PAQ10"]'::jsonb,
+    14
+),
+(
+    'usr-coach-01',
+    NULL,
+    'Gustavo Ferrari',
+    '28.334.901',
+    '+54 11 5566-7788',
+    'profesor@tenisahora.com',
+    'Quilmes, Buenos Aires',
+    'coach',
+    'coach-01',
+    'DOC-01',
+    '2024-01-15',
+    '[]'::jsonb,
+    0
+),
+(
+    'usr-coach-02',
+    NULL,
+    'Laura Domínguez',
+    '31.245.678',
+    '+54 11 4433-2211',
+    'entrenador@tenisahora.com',
+    'Quilmes, Buenos Aires',
+    'coach',
+    'coach-02',
+    'DOC-02',
+    '2024-01-15',
+    '[]'::jsonb,
+    0
+),
+(
+    'usr-coach-03',
+    NULL,
+    'Diego Paredes',
+    '29.871.340',
+    '+54 11 6677-9922',
+    'diego.paredes@tenisahora.com',
+    'Quilmes, Buenos Aires',
+    'coach',
+    'coach-03',
+    'DOC-03',
+    '2024-01-15',
+    '[]'::jsonb,
+    0
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- -----------------------------------------------------------------------------
+-- 6. TORNEOS Y CLASES INICIALES DE REFERENCIA
+-- -----------------------------------------------------------------------------
+INSERT INTO public.torneos (
+    id,
+    nombre,
+    categoria,
+    modalidad,
+    superficie_requerida,
+    fecha_inicio,
+    fecha_fin,
+    costo_inscripcion,
+    max_participantes,
+    inscriptos_actuales,
+    estado,
+    descripcion,
+    reglamento_interno
+) VALUES
+(
+    'trn-01',
+    'Torneo Primavera 2026 Singles Caballeros',
+    'Masculino',
+    'Singles',
+    'Ladrillo',
+    '2026-10-17',
+    '2026-11-01',
+    8000.00,
+    16,
+    16,
+    'en_curso',
+    'Torneo de eliminación directa a 16 jugadores en polvo de ladrillo.',
+    'Partidos al mejor de 3 sets con tie-break en todos los sets. Tolerancia de espera de 15 minutos; pasado ese tiempo se pierde el partido por W.O. Pelotas provistas por el club.'
+),
+(
+    'liga-01',
+    'Liga Primavera Singles Caballeros',
+    'Masculino',
+    'Liga',
+    'Ladrillo',
+    '2026-10-04',
+    '2026-12-13',
+    15000.00,
+    8,
+    8,
+    'en_curso',
+    'Liga todos contra todos a una rueda, con una jornada por fin de semana en polvo de ladrillo.',
+    'Cada partido ganado suma 3 puntos. Partidos al mejor de 3 sets. Desempate en la tabla: 1) diferencia de sets, 2) resultado entre ambos.'
+)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.clases (
+    id,
+    nombre,
+    tipo,
+    modalidad,
+    profesor_id,
+    nombre_profesor,
+    cancha_id,
+    cancha_asignada,
+    dias_horario,
+    franja_horaria,
+    cupo_maximo,
+    inscriptos_actuales,
+    arancel,
+    mes_nombre,
+    estado
+) VALUES
+(
+    'cls-01',
+    'Escuela de Adultos - Nivel Intermedio',
+    'grupal',
+    'clase',
+    'coach-01',
+    'Gustavo Ferrari',
+    'cancha-1',
+    'Cancha 1 (Ladrillo)',
+    'Martes y Jueves',
+    '19:00 - 20:30',
+    12,
+    6,
+    16000.00,
+    'Octubre 2026',
+    'activa'
+),
+(
+    'cls-02',
+    'Iniciación Adultos',
+    'grupal',
+    'entrenamiento',
+    'coach-02',
+    'Laura Domínguez',
+    'cancha-3',
+    'Cancha 3 (Cemento)',
+    'Lunes y Miércoles',
+    '18:00 - 19:30',
+    10,
+    4,
+    14000.00,
+    'Octubre 2026',
+    'activa'
+)
+ON CONFLICT (id) DO NOTHING;
+
+COMMIT;

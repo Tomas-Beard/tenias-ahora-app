@@ -1,0 +1,29 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Usuario / Socio / Perfil vinculado a Supabase Auth (roles: admin, client, coach).
+/// Mapeado a public.usuarios en Supabase.
+/// </summary>
+public class Usuario
+{
+    public string Id { get; set; } = string.Empty;
+    public Guid? AuthUserId { get; set; }
+    public string Nombre { get; set; } = string.Empty;
+    public string Dni { get; set; } = string.Empty;
+    public string? Telefono { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string? Direccion { get; set; }
+    public string Rol { get; set; } = "client"; // 'admin' | 'client' | 'coach'
+    public string? ProfesorId { get; set; }
+    public string? NumeroSocio { get; set; }
+    public DateOnly SocioDesde { get; set; } = DateOnly.FromDateTime(DateTime.UtcNow);
+    public string DescuentosActivosJson { get; set; } = "[]";
+    public int TotalReservas { get; set; }
+    public string? FotoUrl { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public Profesor? Profesor { get; set; }
+    public ICollection<Reserva> Reservas { get; set; } = new List<Reserva>();
+    public ICollection<Pago> Pagos { get; set; } = new List<Pago>();
+}

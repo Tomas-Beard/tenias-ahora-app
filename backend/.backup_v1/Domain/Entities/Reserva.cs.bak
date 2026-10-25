@@ -1,0 +1,39 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Reserva de cancha (duración máxima 2h, antelación máxima 30 días, seña obligatoria 50% y saldo 50%).
+/// Mapeado a public.reservas en Supabase.
+/// </summary>
+public class Reserva
+{
+    public string Id { get; set; } = string.Empty;
+    public string CanchaId { get; set; } = string.Empty;
+    public string UsuarioId { get; set; } = string.Empty;
+    public string TitularDni { get; set; } = string.Empty;
+    public string NombreCancha { get; set; } = string.Empty;
+    public string Superficie { get; set; } = string.Empty;
+    public DateOnly Fecha { get; set; }
+    public TimeOnly HoraInicio { get; set; }
+    public TimeOnly HoraFin { get; set; }
+    public decimal DuracionHoras { get; set; }
+    public string TipoPartido { get; set; } = "singles"; // 'singles' | 'dobles'
+    public string ParticipantesJson { get; set; } = "[]";
+    public string EquipamientoAsignadoJson { get; set; } = """{"nets": 1, "ballTubes": 1, "rackets": 2}""";
+    public decimal CostoCancha { get; set; }
+    public decimal CostoEquipamiento { get; set; }
+    public decimal CostoTotal { get; set; }
+    public decimal SenaPagada { get; set; }
+    public string? ReciboSenaId { get; set; }
+    public string? MetodoPagoSena { get; set; }
+    public decimal SaldoPendiente { get; set; }
+    public bool SaldoAbonado { get; set; }
+    public string? ReciboFinalId { get; set; }
+    public string Estado { get; set; } = "pendiente_pago"; // 'pendiente_pago' | 'confirmada' | 'finalizada' | 'cancelada'
+    public string? DetalleCancelacionJson { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public Cancha? Cancha { get; set; }
+    public Usuario? Usuario { get; set; }
+    public ICollection<Pago> Pagos { get; set; } = new List<Pago>();
+}

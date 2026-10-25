@@ -1,0 +1,446 @@
+-- =============================================================================
+-- PROYECTO: Tenis Ahora (IEEE SRS-830)
+-- ARCHIVO: 002_rls_security_policies.sql
+-- DESCRIPCIÓN: Seguridad a nivel de fila (Row Level Security - RLS) basada en
+--              los tres roles del SRS: Administrador ('admin'), Usuario ('client')
+--              y Profesor/Entrenador ('coach'), siguiendo las mejores prácticas
+--              de rendimiento de Supabase ((SELECT auth.uid()) / InitPlan).
+-- MOTOR: Supabase (PostgreSQL 15+)
+-- =============================================================================
+
+BEGIN;
+
+-- -----------------------------------------------------------------------------
+-- 1. ESQUEMA PRIVADO Y FUNCIONES HELPER DE IDENTIDAD / ROL (SECURITY DEFINER)
+-- -----------------------------------------------------------------------------
+CREATE SCHEMA IF NOT EXISTS private;
+
+REVOKE ALL ON SCHEMA private FROM PUBLIC, anon;
+GRANT USAGE ON SCHEMA private TO authenticated, service_role;
+
+-- 1.1. Resolver el rol efectivo del usuario autenticado en Supabase Auth
+CREATE OR REPLACE FUNCTION private.get_my_role()
+RETURNS VARCHAR(30)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_uid UUID;
+    v_jwt JSONB;
+    v_role VARCHAR(30);
+BEGIN
+    v_uid := (SELECT auth.uid());
+    IF v_uid IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    v_jwt := (SELECT auth.jwt());
+
+    -- 1) Inspeccionar app_metadata.role del JWT
+    v_role := COALESCE(
+        v_jwt -> 'app_metadata' ->> 'role',
+        v_jwt -> 'user_metadata' ->> 'role'
+    );
+
+    IF v_role IN ('admin', 'client', 'coach') THEN
+        RETURN v_role;
+    END IF;
+
+    -- 2) Respaldo contra la tabla public.usuarios usando índice idx_usuarios_auth_user_id
+    SELECT u.rol
+      INTO v_role
+      FROM public.usuarios u
+     WHERE u.auth_user_id = v_uid
+     LIMIT 1;
+
+    RETURN v_role;
+END;
+$$;
+
+-- 1.2. Resolver el ID de negocio (public.usuarios.id) del usuario autenticado
+CREATE OR REPLACE FUNCTION private.get_my_user_id()
+RETURNS VARCHAR(64)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT u.id
+      FROM public.usuarios u
+     WHERE u.auth_user_id = (SELECT auth.uid())
+     LIMIT 1;
+$$;
+
+-- 1.3. Resolver el ID de profesional (public.usuarios.profesor_id) del coach autenticado
+CREATE OR REPLACE FUNCTION private.get_my_coach_id()
+RETURNS VARCHAR(64)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT u.profesor_id
+      FROM public.usuarios u
+     WHERE u.auth_user_id = (SELECT auth.uid())
+       AND u.rol = 'coach'
+     LIMIT 1;
+$$;
+
+REVOKE EXECUTE ON FUNCTION private.get_my_role() FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION private.get_my_user_id() FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION private.get_my_coach_id() FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION private.get_my_role() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION private.get_my_user_id() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION private.get_my_coach_id() TO authenticated, service_role;
+
+-- -----------------------------------------------------------------------------
+-- 2. HABILITACIÓN Y FORZADO DE RLS EN TODAS LAS TABLAS DEL ESQUEMA PUBLIC
+-- -----------------------------------------------------------------------------
+ALTER TABLE public.tipos_cancha ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tipos_cancha FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.profesores ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profesores FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.usuarios ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.usuarios FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.canchas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.canchas FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.stock ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.stock FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.reservas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reservas FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.torneos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.torneos FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.clases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.clases FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.pagos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pagos FORCE ROW LEVEL SECURITY;
+
+-- -----------------------------------------------------------------------------
+-- 3. POLÍTICAS RLS POR TABLA Y ROL ('admin', 'client', 'coach')
+-- -----------------------------------------------------------------------------
+
+-- =============================================================================
+-- 3.1. TABLA: public.tipos_cancha
+-- =============================================================================
+DROP POLICY IF EXISTS rls_tipos_cancha_admin_all ON public.tipos_cancha;
+CREATE POLICY rls_tipos_cancha_admin_all
+    ON public.tipos_cancha
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_tipos_cancha_client_coach_select ON public.tipos_cancha;
+CREATE POLICY rls_tipos_cancha_client_coach_select
+    ON public.tipos_cancha
+    FOR SELECT
+    TO authenticated
+    USING ((SELECT private.get_my_role()) IN ('client', 'coach'));
+
+-- =============================================================================
+-- 3.2. TABLA: public.profesores
+-- =============================================================================
+DROP POLICY IF EXISTS rls_profesores_admin_all ON public.profesores;
+CREATE POLICY rls_profesores_admin_all
+    ON public.profesores
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_profesores_client_coach_select ON public.profesores;
+CREATE POLICY rls_profesores_client_coach_select
+    ON public.profesores
+    FOR SELECT
+    TO authenticated
+    USING ((SELECT private.get_my_role()) IN ('client', 'coach'));
+
+DROP POLICY IF EXISTS rls_profesores_coach_update_own ON public.profesores;
+CREATE POLICY rls_profesores_coach_update_own
+    ON public.profesores
+    FOR UPDATE
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'coach'
+        AND id = (SELECT private.get_my_coach_id())
+    )
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'coach'
+        AND id = (SELECT private.get_my_coach_id())
+    );
+
+-- =============================================================================
+-- 3.3. TABLA: public.usuarios
+-- =============================================================================
+DROP POLICY IF EXISTS rls_usuarios_admin_all ON public.usuarios;
+CREATE POLICY rls_usuarios_admin_all
+    ON public.usuarios
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_usuarios_client_select_own ON public.usuarios;
+CREATE POLICY rls_usuarios_client_select_own
+    ON public.usuarios
+    FOR SELECT
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'client'
+        AND auth_user_id = (SELECT auth.uid())
+    );
+
+DROP POLICY IF EXISTS rls_usuarios_client_update_own ON public.usuarios;
+CREATE POLICY rls_usuarios_client_update_own
+    ON public.usuarios
+    FOR UPDATE
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'client'
+        AND auth_user_id = (SELECT auth.uid())
+    )
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'client'
+        AND auth_user_id = (SELECT auth.uid())
+        AND rol = 'client'
+    );
+
+DROP POLICY IF EXISTS rls_usuarios_coach_select_own ON public.usuarios;
+CREATE POLICY rls_usuarios_coach_select_own
+    ON public.usuarios
+    FOR SELECT
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'coach'
+        AND auth_user_id = (SELECT auth.uid())
+    );
+
+DROP POLICY IF EXISTS rls_usuarios_coach_update_own ON public.usuarios;
+CREATE POLICY rls_usuarios_coach_update_own
+    ON public.usuarios
+    FOR UPDATE
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'coach'
+        AND auth_user_id = (SELECT auth.uid())
+    )
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'coach'
+        AND auth_user_id = (SELECT auth.uid())
+        AND rol = 'coach'
+    );
+
+-- =============================================================================
+-- 3.4. TABLA: public.canchas
+-- =============================================================================
+DROP POLICY IF EXISTS rls_canchas_admin_all ON public.canchas;
+CREATE POLICY rls_canchas_admin_all
+    ON public.canchas
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_canchas_client_coach_select ON public.canchas;
+CREATE POLICY rls_canchas_client_coach_select
+    ON public.canchas
+    FOR SELECT
+    TO authenticated
+    USING ((SELECT private.get_my_role()) IN ('client', 'coach'));
+
+-- =============================================================================
+-- 3.5. TABLA: public.stock
+-- =============================================================================
+DROP POLICY IF EXISTS rls_stock_admin_all ON public.stock;
+CREATE POLICY rls_stock_admin_all
+    ON public.stock
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_stock_client_coach_select ON public.stock;
+CREATE POLICY rls_stock_client_coach_select
+    ON public.stock
+    FOR SELECT
+    TO authenticated
+    USING ((SELECT private.get_my_role()) IN ('client', 'coach'));
+
+-- =============================================================================
+-- 3.6. TABLA: public.reservas
+-- =============================================================================
+DROP POLICY IF EXISTS rls_reservas_admin_all ON public.reservas;
+CREATE POLICY rls_reservas_admin_all
+    ON public.reservas
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_reservas_client_select_own ON public.reservas;
+CREATE POLICY rls_reservas_client_select_own
+    ON public.reservas
+    FOR SELECT
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'client'
+        AND usuario_id = (SELECT private.get_my_user_id())
+    );
+
+DROP POLICY IF EXISTS rls_reservas_client_insert_own ON public.reservas;
+CREATE POLICY rls_reservas_client_insert_own
+    ON public.reservas
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'client'
+        AND usuario_id = (SELECT private.get_my_user_id())
+    );
+
+DROP POLICY IF EXISTS rls_reservas_client_update_own ON public.reservas;
+CREATE POLICY rls_reservas_client_update_own
+    ON public.reservas
+    FOR UPDATE
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'client'
+        AND usuario_id = (SELECT private.get_my_user_id())
+    )
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'client'
+        AND usuario_id = (SELECT private.get_my_user_id())
+    );
+
+-- =============================================================================
+-- 3.7. TABLA: public.torneos
+-- =============================================================================
+DROP POLICY IF EXISTS rls_torneos_admin_all ON public.torneos;
+CREATE POLICY rls_torneos_admin_all
+    ON public.torneos
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_torneos_client_coach_select ON public.torneos;
+CREATE POLICY rls_torneos_client_coach_select
+    ON public.torneos
+    FOR SELECT
+    TO authenticated
+    USING ((SELECT private.get_my_role()) IN ('client', 'coach'));
+
+-- =============================================================================
+-- 3.8. TABLA: public.clases
+-- =============================================================================
+DROP POLICY IF EXISTS rls_clases_admin_all ON public.clases;
+CREATE POLICY rls_clases_admin_all
+    ON public.clases
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_clases_client_select ON public.clases;
+CREATE POLICY rls_clases_client_select
+    ON public.clases
+    FOR SELECT
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'client');
+
+DROP POLICY IF EXISTS rls_clases_coach_select_own ON public.clases;
+CREATE POLICY rls_clases_coach_select_own
+    ON public.clases
+    FOR SELECT
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'coach'
+        AND profesor_id = (SELECT private.get_my_coach_id())
+    );
+
+DROP POLICY IF EXISTS rls_clases_coach_insert_own ON public.clases;
+CREATE POLICY rls_clases_coach_insert_own
+    ON public.clases
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'coach'
+        AND profesor_id = (SELECT private.get_my_coach_id())
+    );
+
+DROP POLICY IF EXISTS rls_clases_coach_update_own ON public.clases;
+CREATE POLICY rls_clases_coach_update_own
+    ON public.clases
+    FOR UPDATE
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'coach'
+        AND profesor_id = (SELECT private.get_my_coach_id())
+    )
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'coach'
+        AND profesor_id = (SELECT private.get_my_coach_id())
+    );
+
+-- =============================================================================
+-- 3.9. TABLA: public.pagos
+-- =============================================================================
+DROP POLICY IF EXISTS rls_pagos_admin_all ON public.pagos;
+CREATE POLICY rls_pagos_admin_all
+    ON public.pagos
+    FOR ALL
+    TO authenticated
+    USING ((SELECT private.get_my_role()) = 'admin')
+    WITH CHECK ((SELECT private.get_my_role()) = 'admin');
+
+DROP POLICY IF EXISTS rls_pagos_client_select_own ON public.pagos;
+CREATE POLICY rls_pagos_client_select_own
+    ON public.pagos
+    FOR SELECT
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'client'
+        AND usuario_id = (SELECT private.get_my_user_id())
+    );
+
+DROP POLICY IF EXISTS rls_pagos_client_insert_own ON public.pagos;
+CREATE POLICY rls_pagos_client_insert_own
+    ON public.pagos
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'client'
+        AND usuario_id = (SELECT private.get_my_user_id())
+    );
+
+DROP POLICY IF EXISTS rls_pagos_coach_select_own ON public.pagos;
+CREATE POLICY rls_pagos_coach_select_own
+    ON public.pagos
+    FOR SELECT
+    TO authenticated
+    USING (
+        (SELECT private.get_my_role()) = 'coach'
+        AND usuario_id = (SELECT private.get_my_user_id())
+    );
+
+DROP POLICY IF EXISTS rls_pagos_coach_insert_own ON public.pagos;
+CREATE POLICY rls_pagos_coach_insert_own
+    ON public.pagos
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (
+        (SELECT private.get_my_role()) = 'coach'
+        AND usuario_id = (SELECT private.get_my_user_id())
+    );
+
+COMMIT;

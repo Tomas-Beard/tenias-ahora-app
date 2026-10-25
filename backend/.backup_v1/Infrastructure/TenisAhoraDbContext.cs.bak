@@ -1,0 +1,297 @@
+using Microsoft.EntityFrameworkCore;
+using TenisAhora.Domain.Entities;
+
+namespace TenisAhora.Infrastructure.Persistence;
+
+/// <summary>
+/// Contexto de persistencia EF Core 8 para Supabase (PostgreSQL 15+).
+/// Mapea todas las entidades del dominio al esquema relacional snake_case definido en la Fase 1.
+/// </summary>
+public class TenisAhoraDbContext : DbContext
+{
+    public TenisAhoraDbContext(DbContextOptions<TenisAhoraDbContext> options)
+        : base(options)
+    {
+    }
+
+    public DbSet<TipoCancha> TiposCancha => Set<TipoCancha>();
+    public DbSet<Profesor> Profesores => Set<Profesor>();
+    public DbSet<Usuario> Usuarios => Set<Usuario>();
+    public DbSet<Cancha> Canchas => Set<Cancha>();
+    public DbSet<StockItem> StockItems => Set<StockItem>();
+    public DbSet<Reserva> Reservas => Set<Reserva>();
+    public DbSet<Torneo> Torneos => Set<Torneo>();
+    public DbSet<Clase> Clases => Set<Clase>();
+    public DbSet<Pago> Pagos => Set<Pago>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+
+        modelBuilder.HasDefaultSchema("public");
+
+        // 1. public.tipos_cancha
+        modelBuilder.Entity<TipoCancha>(entity =>
+        {
+            entity.ToTable("tipos_cancha");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(100).IsRequired();
+            entity.Property(e => e.Etiqueta).HasColumnName("etiqueta").HasMaxLength(120);
+            entity.Property(e => e.Descripcion).HasColumnName("descripcion");
+            entity.Property(e => e.Velocidad).HasColumnName("velocidad").HasMaxLength(50);
+            entity.Property(e => e.PrecioBaseHora).HasColumnName("precio_base_hora").HasPrecision(12, 2);
+            entity.Property(e => e.FrecuenciaMantenimiento).HasColumnName("frecuencia_mantenimiento").HasMaxLength(200);
+            entity.Property(e => e.MaxAlumnosPorClase).HasColumnName("max_alumnos_por_clase");
+            entity.Property(e => e.Activo).HasColumnName("activo");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+        });
+
+        // 2. public.profesores
+        modelBuilder.Entity<Profesor>(entity =>
+        {
+            entity.ToTable("profesores");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(150).IsRequired();
+            entity.Property(e => e.Tipo).HasColumnName("tipo").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.Dni).HasColumnName("dni").HasMaxLength(20).IsRequired();
+            entity.Property(e => e.Telefono).HasColumnName("telefono").HasMaxLength(50);
+            entity.Property(e => e.Email).HasColumnName("email").HasMaxLength(255).IsRequired();
+            entity.Property(e => e.PoseeLicenciaOficial).HasColumnName("posee_licencia_oficial");
+            entity.Property(e => e.HorariosDisponibles).HasColumnName("horarios_disponibles");
+            entity.Property(e => e.DetalleLicenciaJson).HasColumnName("detalle_licencia").HasColumnType("jsonb");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+        });
+
+        // 3. public.usuarios
+        modelBuilder.Entity<Usuario>(entity =>
+        {
+            entity.ToTable("usuarios");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.AuthUserId).HasColumnName("auth_user_id");
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(150).IsRequired();
+            entity.Property(e => e.Dni).HasColumnName("dni").HasMaxLength(20).IsRequired();
+            entity.Property(e => e.Telefono).HasColumnName("telefono").HasMaxLength(50);
+            entity.Property(e => e.Email).HasColumnName("email").HasMaxLength(255).IsRequired();
+            entity.Property(e => e.Direccion).HasColumnName("direccion").HasMaxLength(255);
+            entity.Property(e => e.Rol).HasColumnName("rol").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.ProfesorId).HasColumnName("profesor_id").HasMaxLength(64);
+            entity.Property(e => e.NumeroSocio).HasColumnName("numero_socio").HasMaxLength(50);
+            entity.Property(e => e.SocioDesde).HasColumnName("socio_desde");
+            entity.Property(e => e.DescuentosActivosJson).HasColumnName("descuentos_activos").HasColumnType("jsonb");
+            entity.Property(e => e.TotalReservas).HasColumnName("total_reservas");
+            entity.Property(e => e.FotoUrl).HasColumnName("foto_url");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+
+            entity.HasOne(e => e.Profesor)
+                .WithMany(p => p.UsuariosVinculados)
+                .HasForeignKey(e => e.ProfesorId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // 4. public.canchas
+        modelBuilder.Entity<Cancha>(entity =>
+        {
+            entity.ToTable("canchas");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(150).IsRequired();
+            entity.Property(e => e.TipoCanchaId).HasColumnName("tipo_cancha_id").HasMaxLength(64).IsRequired();
+            entity.Property(e => e.Superficie).HasColumnName("superficie").HasMaxLength(100).IsRequired();
+            entity.Property(e => e.Capacidad).HasColumnName("capacidad");
+            entity.Property(e => e.PrecioPorHora).HasColumnName("precio_por_hora").HasPrecision(12, 2);
+            entity.Property(e => e.Estado).HasColumnName("estado").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.Descripcion).HasColumnName("descripcion");
+            entity.Property(e => e.NotasMantenimiento).HasColumnName("notas_mantenimiento");
+            entity.Property(e => e.DisponibilidadJson).HasColumnName("disponibilidad").HasColumnType("jsonb");
+            entity.Property(e => e.FotoUrl).HasColumnName("foto_url");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+
+            entity.HasOne(e => e.TipoCancha)
+                .WithMany(t => t.Canchas)
+                .HasForeignKey(e => e.TipoCanchaId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // 5. public.stock
+        modelBuilder.Entity<StockItem>(entity =>
+        {
+            entity.ToTable("stock");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(150).IsRequired();
+            entity.Property(e => e.Categoria).HasColumnName("categoria").HasMaxLength(50).IsRequired();
+            entity.Property(e => e.StockTotal).HasColumnName("stock_total");
+            entity.Property(e => e.StockEnUso).HasColumnName("stock_en_uso");
+            entity.Property(e => e.StockDisponible).HasColumnName("stock_disponible");
+            entity.Property(e => e.Unidad).HasColumnName("unidad").HasMaxLength(50).IsRequired();
+            entity.Property(e => e.PrecioUnitario).HasColumnName("precio_unitario").HasPrecision(12, 2);
+            entity.Property(e => e.Estado).HasColumnName("estado").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.Descripcion).HasColumnName("descripcion");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+        });
+
+        // 6. public.reservas
+        modelBuilder.Entity<Reserva>(entity =>
+        {
+            entity.ToTable("reservas");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.CanchaId).HasColumnName("cancha_id").HasMaxLength(64).IsRequired();
+            entity.Property(e => e.UsuarioId).HasColumnName("usuario_id").HasMaxLength(64).IsRequired();
+            entity.Property(e => e.TitularDni).HasColumnName("titular_dni").HasMaxLength(20).IsRequired();
+            entity.Property(e => e.NombreCancha).HasColumnName("nombre_cancha").HasMaxLength(150).IsRequired();
+            entity.Property(e => e.Superficie).HasColumnName("superficie").HasMaxLength(100).IsRequired();
+            entity.Property(e => e.Fecha).HasColumnName("fecha");
+            entity.Property(e => e.HoraInicio).HasColumnName("hora_inicio");
+            entity.Property(e => e.HoraFin).HasColumnName("hora_fin");
+            entity.Property(e => e.DuracionHoras).HasColumnName("duracion_horas").HasPrecision(4, 2);
+            entity.Property(e => e.TipoPartido).HasColumnName("tipo_partido").HasMaxLength(20).IsRequired();
+            entity.Property(e => e.ParticipantesJson).HasColumnName("participantes").HasColumnType("jsonb");
+            entity.Property(e => e.EquipamientoAsignadoJson).HasColumnName("equipamiento_asignado").HasColumnType("jsonb");
+            entity.Property(e => e.CostoCancha).HasColumnName("costo_cancha").HasPrecision(12, 2);
+            entity.Property(e => e.CostoEquipamiento).HasColumnName("costo_equipamiento").HasPrecision(12, 2);
+            entity.Property(e => e.CostoTotal).HasColumnName("costo_total").HasPrecision(12, 2);
+            entity.Property(e => e.SenaPagada).HasColumnName("sena_pagada").HasPrecision(12, 2);
+            entity.Property(e => e.ReciboSenaId).HasColumnName("recibo_sena_id").HasMaxLength(64);
+            entity.Property(e => e.MetodoPagoSena).HasColumnName("metodo_pago_sena").HasMaxLength(50);
+            entity.Property(e => e.SaldoPendiente).HasColumnName("saldo_pendiente").HasPrecision(12, 2);
+            entity.Property(e => e.SaldoAbonado).HasColumnName("saldo_abonado");
+            entity.Property(e => e.ReciboFinalId).HasColumnName("recibo_final_id").HasMaxLength(64);
+            entity.Property(e => e.Estado).HasColumnName("estado").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.DetalleCancelacionJson).HasColumnName("detalle_cancelacion").HasColumnType("jsonb");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+
+            entity.HasOne(e => e.Cancha)
+                .WithMany(c => c.Reservas)
+                .HasForeignKey(e => e.CanchaId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Usuario)
+                .WithMany(u => u.Reservas)
+                .HasForeignKey(e => e.UsuarioId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // 7. public.torneos
+        modelBuilder.Entity<Torneo>(entity =>
+        {
+            entity.ToTable("torneos");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(200).IsRequired();
+            entity.Property(e => e.Categoria).HasColumnName("categoria").HasMaxLength(100).IsRequired();
+            entity.Property(e => e.Modalidad).HasColumnName("modalidad").HasMaxLength(50).IsRequired();
+            entity.Property(e => e.SuperficieRequerida).HasColumnName("superficie_requerida").HasMaxLength(100);
+            entity.Property(e => e.FechaInicio).HasColumnName("fecha_inicio");
+            entity.Property(e => e.FechaFin).HasColumnName("fecha_fin");
+            entity.Property(e => e.CostoInscripcion).HasColumnName("costo_inscripcion").HasPrecision(12, 2);
+            entity.Property(e => e.MaxParticipantes).HasColumnName("max_participantes");
+            entity.Property(e => e.InscriptosActuales).HasColumnName("inscriptos_actuales");
+            entity.Property(e => e.Estado).HasColumnName("estado").HasMaxLength(40).IsRequired();
+            entity.Property(e => e.Descripcion).HasColumnName("descripcion");
+            entity.Property(e => e.ReglamentoInterno).HasColumnName("reglamento_interno").IsRequired();
+            entity.Property(e => e.DocumentoReglamentoJson).HasColumnName("documento_reglamento").HasColumnType("jsonb");
+            entity.Property(e => e.ParticipantesJson).HasColumnName("participantes").HasColumnType("jsonb");
+            entity.Property(e => e.CuadroJson).HasColumnName("cuadro").HasColumnType("jsonb");
+            entity.Property(e => e.TablaPosicionesJson).HasColumnName("tabla_posiciones").HasColumnType("jsonb");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+        });
+
+        // 8. public.clases
+        modelBuilder.Entity<Clase>(entity =>
+        {
+            entity.ToTable("clases");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(200).IsRequired();
+            entity.Property(e => e.Tipo).HasColumnName("tipo").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.Modalidad).HasColumnName("modalidad").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.ProfesorId).HasColumnName("profesor_id").HasMaxLength(64).IsRequired();
+            entity.Property(e => e.NombreProfesor).HasColumnName("nombre_profesor").HasMaxLength(150).IsRequired();
+            entity.Property(e => e.CanchaId).HasColumnName("cancha_id").HasMaxLength(64);
+            entity.Property(e => e.CanchaAsignada).HasColumnName("cancha_asignada").HasMaxLength(150);
+            entity.Property(e => e.DiasHorario).HasColumnName("dias_horario").HasMaxLength(150);
+            entity.Property(e => e.FranjaHoraria).HasColumnName("franja_horaria").HasMaxLength(100);
+            entity.Property(e => e.FechaParticular).HasColumnName("fecha_particular");
+            entity.Property(e => e.CupoMaximo).HasColumnName("cupo_maximo");
+            entity.Property(e => e.InscriptosActuales).HasColumnName("inscriptos_actuales");
+            entity.Property(e => e.Arancel).HasColumnName("arancel").HasPrecision(12, 2);
+            entity.Property(e => e.MesNombre).HasColumnName("mes_nombre").HasMaxLength(50);
+            entity.Property(e => e.SesionesJson).HasColumnName("sesiones").HasColumnType("jsonb");
+            entity.Property(e => e.AlumnosJson).HasColumnName("alumnos").HasColumnType("jsonb");
+            entity.Property(e => e.Estado).HasColumnName("estado").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.Notas).HasColumnName("notas");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+
+            entity.HasOne(e => e.Profesor)
+                .WithMany(p => p.ClasesDictadas)
+                .HasForeignKey(e => e.ProfesorId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Cancha)
+                .WithMany(c => c.Clases)
+                .HasForeignKey(e => e.CanchaId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // 9. public.pagos
+        modelBuilder.Entity<Pago>(entity =>
+        {
+            entity.ToTable("pagos");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").HasMaxLength(64);
+            entity.Property(e => e.ReservaId).HasColumnName("reserva_id").HasMaxLength(64);
+            entity.Property(e => e.TorneoId).HasColumnName("torneo_id").HasMaxLength(64);
+            entity.Property(e => e.ClaseId).HasColumnName("clase_id").HasMaxLength(64);
+            entity.Property(e => e.UsuarioId).HasColumnName("usuario_id").HasMaxLength(64).IsRequired();
+            entity.Property(e => e.ClienteNombre).HasColumnName("cliente_nombre").HasMaxLength(150).IsRequired();
+            entity.Property(e => e.ClienteDni).HasColumnName("cliente_dni").HasMaxLength(20).IsRequired();
+            entity.Property(e => e.Concepto).HasColumnName("concepto").HasMaxLength(255).IsRequired();
+            entity.Property(e => e.TipoPago).HasColumnName("tipo_pago").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.MedioPago).HasColumnName("medio_pago").HasMaxLength(50).IsRequired();
+            entity.Property(e => e.MontoTotal).HasColumnName("monto_total").HasPrecision(12, 2);
+            entity.Property(e => e.Estado).HasColumnName("estado").HasMaxLength(30).IsRequired();
+            entity.Property(e => e.MpPreferenceId).HasColumnName("mp_preference_id").HasMaxLength(120);
+            entity.Property(e => e.MpPaymentId).HasColumnName("mp_payment_id").HasMaxLength(120);
+            entity.Property(e => e.MpStatus).HasColumnName("mp_status").HasMaxLength(50);
+            entity.Property(e => e.QrData).HasColumnName("qr_data");
+            entity.Property(e => e.PaymentUrl).HasColumnName("payment_url");
+            entity.Property(e => e.ItemsJson).HasColumnName("items").HasColumnType("jsonb");
+            entity.Property(e => e.CajeroNombre).HasColumnName("cajero_nombre").HasMaxLength(100).IsRequired();
+            entity.Property(e => e.FechaPago).HasColumnName("fecha_pago");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+
+            entity.HasOne(e => e.Reserva)
+                .WithMany(r => r.Pagos)
+                .HasForeignKey(e => e.ReservaId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Torneo)
+                .WithMany(t => t.Pagos)
+                .HasForeignKey(e => e.TorneoId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.Clase)
+                .WithMany(c => c.Pagos)
+                .HasForeignKey(e => e.ClaseId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            entity.HasOne(e => e.Usuario)
+                .WithMany(u => u.Pagos)
+                .HasForeignKey(e => e.UsuarioId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+}

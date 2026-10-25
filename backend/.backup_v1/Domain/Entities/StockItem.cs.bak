@@ -1,0 +1,21 @@
+namespace TenisAhora.Domain.Entities;
+
+/// <summary>
+/// Ítem de inventario de equipamiento deportivo (Redes, Pelotas, Raquetas, Accesorios).
+/// Mapeado a public.stock en Supabase.
+/// </summary>
+public class StockItem
+{
+    public string Id { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string Categoria { get; set; } = "Equipamiento"; // 'Redes' | 'Pelotas' | 'Raquetas' | 'Accesorios' | 'Equipamiento'
+    public int StockTotal { get; set; }
+    public int StockEnUso { get; set; }
+    public int StockDisponible { get; set; }
+    public string Unidad { get; set; } = "unidades";
+    public decimal PrecioUnitario { get; set; }
+    public string Estado { get; set; } = "disponible"; // 'disponible' | 'agotado'
+    public string? Descripcion { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
