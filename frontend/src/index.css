@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-800 antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+/* Custom styles for printing receipts, member cards and attendance reports */
+@media print {
+  /* Hide standard UI */
+  body * {
+    visibility: hidden;
+  }
+
+  /* Make target areas visible */
+  #printable-area, #printable-area *,
+  #printable-card-area, #printable-card-area *,
+  #printable-receipt-area, #printable-receipt-area *,
+  #printable-attendance-area, #printable-attendance-area * {
+    visibility: visible;
+  }
+
+  /* Force background colors and gradients in print */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Position target element at top of print page */
+  #printable-area,
+  #printable-receipt-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 10mm !important;
+    background: white !important;
+    color: black !important;
+  }
+
+  /* Member Card Print: Exact centered card layout */
+  #printable-card-area {
+    position: absolute;
+    left: 0;
+    top: 20mm;
+    width: 100% !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: transparent !important;
+  }
+
+  /* Attendance Sheet: Landscape A4 */
+  #printable-attendance-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    padding: 8mm !important;
+    margin: 0 !important;
+  }
+
+  @page {
+    margin: 10mm;
+  }
+
+  /* El modal bloquea el scroll del body; al imprimir se libera para que salga todo el contenido */
+  body {
+    overflow: visible !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Glassmorphism helpers */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+}
+
+.glass-dark {
+  background: rgba(15, 41, 30, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}

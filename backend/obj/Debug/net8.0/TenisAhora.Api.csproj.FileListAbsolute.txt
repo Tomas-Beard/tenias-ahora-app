@@ -61,3 +61,4 @@ c:\Users\HP\Desktop\tenias-ahora-app\backend\obj\Debug\net8.0\refint\TenisAhora.
 c:\Users\HP\Desktop\tenias-ahora-app\backend\obj\Debug\net8.0\TenisAhora.Api.pdb
 c:\Users\HP\Desktop\tenias-ahora-app\backend\obj\Debug\net8.0\TenisAhora.Api.genruntimeconfig.cache
 c:\Users\HP\Desktop\tenias-ahora-app\backend\obj\Debug\net8.0\ref\TenisAhora.Api.dll
+c:\Users\HP\Desktop\tenias-ahora-app\backend\obj\Debug\net8.0\TenisAhora.Api.sourcelink.json
