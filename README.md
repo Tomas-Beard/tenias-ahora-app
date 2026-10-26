@@ -193,6 +193,11 @@ tenias-ahora-app/
 ├── backend/                                    # Backend Web API en C# (.NET 8 — Clean Architecture)
 │   ├── Api/
 │   │   ├── Controllers/
+│   │   │   ├── AcademiaDocumentosController.cs # Profesores, Clases/Entrenamientos (TPT), Turnos Particulares y Documentos
+│   │   │   ├── AuthUsuariosController.cs       # Login, Registro, Perfil (/yo), Usuarios, Socios y Descuentos asignados
+│   │   │   ├── CajaPagosWebhookController.cs   # Recibos, Descuentos, Facturas, Reembolsos y Webhook de Mercado Pago
+│   │   │   ├── CanchasStockController.cs       # Canchas, Tipos de Cancha, Stock/Productos y Configuración del Club
+│   │   │   ├── CompetenciasController.cs       # Torneos, Ligas, Tipos de Competencia, Reglamentos, Inscripciones y Partidos
 │   │   │   ├── HealthController.cs             # GET /api/health (Healthcheck Docker/Nginx)
 │   │   │   └── ReservasController.cs           # CRUD + Pagar Saldo + Cancelar Reservas
 │   │   └── Middleware/
@@ -338,14 +343,47 @@ sudo DOMAIN="tenisahora.club" ADMIN_EMAIL="admin@tenisahora.club" ./deploy.sh
 
 ---
 
-## 8. Endpoints Principales de la API (`.NET 8`)
+## 8. Catálogo Completo de Endpoints REST de la API (`.NET 8`)
 
-| Método | Ruta | Autenticación | Descripción |
-| :---: | :--- | :---: | :--- |
-| `GET` | `/api/health` | Público | Estado de salud del servicio (`healthy`) y marca de tiempo UTC. |
-| `GET` | `/api/reservas` | `Bearer JWT` (`client` / `admin`) | Lista las reservas del socio autenticado o el padrón completo para el personal administrativo. |
-| `GET` | `/api/reservas/ocupacion` | `Bearer JWT` | Devuelve las franjas horarias ocupadas en todas las canchas sin exponer datos sensibles de otros socios. |
-| `POST` | `/api/reservas` | `Bearer JWT` (`client` / `admin`) | Ejecuta la transacción atómica `Serializable`: valida cancha, descuenta stock, crea preferencia del 50% en Mercado Pago y emite `Pago` + `Recibo` con QR. |
-| `PUT` | `/api/reservas/{id}` | `Bearer JWT` (`admin`) | Modifica cancha, fecha, horario o participantes recalculando costos y validando no solapamiento (`RF021`). |
-| `POST` | `/api/reservas/{id}/pagar-saldo` | `Bearer JWT` (`admin`) | Liquida el 50% de saldo pendiente al finalizar el partido, restituye el stock deportivo y emite el recibo final. |
-| `POST` | `/api/reservas/{id}/cancelar` | `Bearer JWT` (`client` / `admin`) | Cancela la reserva aplicando la política `RD02-RD04` (reembolso 100% si `>= 6 hs` o retención del 50% si `< 6 hs`) y restituye el stock. |
+La capa `Api/Controllers/` expone paridad funcional del 100% con el cliente SPA (`frontend/src/api/http.js`), operando directamente sobre `TenisAhoraDbContext` y las 34 tablas físicas en Supabase PostgreSQL:
+
+| Módulo / Controlador | Método | Ruta | Autenticación | Descripción y Reglas SRS-830 |
+| :--- | :---: | :--- | :---: | :--- |
+| **Salud (`HealthController`)** | `GET` | `/api/health` | Público | Estado de salud del servicio (`healthy`) y marca de tiempo UTC. |
+| **Módulo 1: Auth, Usuarios y Socios (`AuthUsuariosController`)** | `POST` | `/api/auth/login` | Público | Autentica por correo/contraseña sobre `Usuario` (TPT), emite JWT HS256 y devuelve `{ token, user }`. |
+| | `POST` | `/api/auth/registrar` | Público | Registra un nuevo `Cliente` (TPT) validando email y DNI únicos (`TA-XXXX`). |
+| | `GET` | `/api/auth/yo` | `Bearer JWT` | Devuelve el perfil completo y claims del usuario autenticado. |
+| | `GET` / `POST` / `PUT` / `DELETE` | `/api/usuarios` (`/api/usuarios/{id}`) | `Bearer JWT` | Padrón y ABM de usuarios con herencia TPT (`Cliente`, `Administrador`, `Profesional`). |
+| | `GET` | `/api/socios` | `Bearer JWT` (`admin` / `coach`) | Lista el padrón de socios (`Cliente`) con sus descuentos activos. |
+| | `PUT` | `/api/usuarios/{id}/descuentos` | `Bearer JWT` (`admin`) | Sincroniza la tabla relacional `clientes_descuentos` del socio (`RF138-RF142`). |
+| **Módulos 2 y 3: Canchas, Stock y Config (`CanchasStockController`)** | `GET` / `POST` / `PUT` / `DELETE` | `/api/canchas` (`/api/canchas/{id}`) | `Bearer JWT` (`admin` en escritura) | Gestión de `Cancha` con sus `HorariosCancha` y `BloqueosMantenimiento`. |
+| | `PATCH` | `/api/canchas/{id}/estado` | `Bearer JWT` (`admin`) | Actualiza el estado (`disponible`, `mantenimiento`, `ocupada`) y sincroniza bloqueos activos (`RD06`). |
+| | `PUT` | `/api/canchas/{id}/disponibilidad` | `Bearer JWT` (`admin`) | Actualiza horarios de apertura/cierre y bloqueos programados de mantenimiento (`RF016-RF019`). |
+| | `GET` / `POST` / `PUT` / `DELETE` | `/api/tipos-cancha` (`/api/tipos-cancha/{id}`) | `Bearer JWT` (`admin` en escritura) | Catálogo de superficies (`TipoCancha`), cupo máximo (`<= 30`) y bloqueo de borrado si está en uso. |
+| | `GET` / `POST` / `PUT` / `DELETE` | `/api/stock` (`/api/stock/{id}`) | `Bearer JWT` (`admin` en escritura) | Inventario deportivo (`Producto` + `Stock`) con invariante `total = disponible + en_uso`. |
+| | `PATCH` | `/api/stock/{id}/ajuste` | `Bearer JWT` (`admin`) | Ajusta el `StockTotal` validando `totalStock >= StockEnUso` y recalculando `StockDisponible`. |
+| | `GET` | `/api/configuracion` | `Bearer JWT` | Devuelve la `PoliticaReserva` activa del club (`RD01-RD05`). |
+| **Módulo 3: Reservas (`ReservasController`)** | `GET` | `/api/reservas` | `Bearer JWT` (`client` / `admin`) | Lista las reservas del socio autenticado o el padrón completo para el personal administrativo. |
+| | `GET` | `/api/reservas/ocupacion` | `Bearer JWT` | Devuelve las franjas horarias ocupadas en todas las canchas sin exponer datos sensibles de otros socios. |
+| | `POST` | `/api/reservas` | `Bearer JWT` (`client` / `admin`) | Ejecuta la transacción atómica `Serializable`: valida cancha, descuenta stock, crea preferencia del 50% en Mercado Pago y emite `Pago` + `Recibo` con QR. |
+| | `PUT` | `/api/reservas/{id}` | `Bearer JWT` (`admin`) | Modifica cancha, fecha, horario o participantes recalculando costos y validando no solapamiento (`RF021`). |
+| | `POST` | `/api/reservas/{id}/pagar-saldo` | `Bearer JWT` (`admin`) | Liquida el 50% de saldo pendiente al finalizar el partido, restituye el stock deportivo y emite el recibo final. |
+| | `POST` | `/api/reservas/{id}/cancelar` | `Bearer JWT` (`client` / `admin`) | Cancela la reserva aplicando la política `RD02-RD04` (reembolso 100% si `>= 6 hs` o retención del 50% si `< 6 hs`) y restituye el stock. |
+| **Módulo 4: Competencias (`CompetenciasController`)** | `GET` / `POST` / `PUT` / `DELETE` | `/api/tipos-competencia` (`/api/tipos-competencia/{id}`) | `Bearer JWT` (`admin` en escritura) | Formatos oficiales (`TipoCompetencia`) y reglas de puntuación (`RF061-RF065`). |
+| | `GET` / `POST` / `PUT` / `DELETE` | `/api/torneos` y `/api/ligas` | `Bearer JWT` (`admin` en escritura) | Gestión integral de `Competencia` (`torneo` y `liga`), premios, cupos, equipos y partidos. |
+| | `PUT` | `/api/torneos/{id}/reglamento` y `/api/ligas/{id}/reglamento` | `Bearer JWT` (`admin`) | Actualiza el `Reglamento` normativo y su documento digital adjunto (`RF041`, `RF048`). |
+| | `POST` / `DELETE` | `/api/torneos/{id}/inscripciones` y `/api/ligas/{id}/inscripciones` | `Bearer JWT` (`client` / `admin`) | Inscribe o da de baja participantes validando cupo y DNI único, creando `Equipo`, `Pago` y `Recibo`. |
+| | `POST` / `PUT` | `/api/torneos/{id}/enfrentamientos` y `/api/ligas/{id}/enfrentamientos` | `Bearer JWT` (`admin`) | Programa o reprograma partidos (`Enfrentamiento`) en rondas o jornadas. |
+| | `POST` | `/api/ligas/{id}/enfrentamientos/{matchId}/resultado` | `Bearer JWT` (`admin`) | Registra marcador y ganador y recalcula la tabla de posiciones (`PJ`, `PG`, `PP`, `SF`, `SC`, `DIF`, `Puntos`). |
+| **Módulo 5: Academia y Documentos (`AcademiaDocumentosController`)** | `GET` / `POST` / `PUT` / `DELETE` | `/api/profesores` (`/api/profesores/{id}`) | `Bearer JWT` (`admin` en escritura) | Gestión de `Profesional` (TPT), `Certificado` y `HorarioProfesional`. |
+| | `PUT` | `/api/profesores/{id}/disponibilidad` y `/certificacion` | `Bearer JWT` (`coach` / `admin`) | Actualiza grilla horaria docente y título habilitante con validación de vigencia (`RD08`, `RD09`). |
+| | `GET` / `POST` / `PUT` / `DELETE` | `/api/clases` (`/api/clases/{id}`) | `Bearer JWT` (`admin` en escritura) | Gestión TPT de `ActividadGrupal` (`Clase` y `Entrenamiento`) validando cupo `<= 30` (`RD07`, `RD10`) y certificado docente vigente (`RD09`). |
+| | `POST` / `DELETE` | `/api/clases/{id}/alumnos` (`/alumnos/{studentDni}`) | `Bearer JWT` (`client` / `admin`) | Inscripción y baja de alumnos (`InscripcionActividad`) con control de cupo. |
+| | `POST` | `/api/clases/{id}/asistencia/alternar`, `/sesion`, `/registrar` | `Bearer JWT` (`coach` / `admin`) | Gestión de planillas de `Asistencia` por sesión (`P`, `A`, `-`). |
+| | `GET` / `POST` / `PUT` / `DELETE` | `/api/clases-particulares` y `/{id}/cancelar` | `Bearer JWT` | Gestión de `TurnoParticular` validando no solapamiento horario de profesor ni alumno. |
+| | `POST` / `GET` | `/api/documentos` y `/api/documentos/{id}` | `Bearer JWT` (`POST`) / Público (`GET`) | Subida y descarga binaria de documentos PDF/JPG/PNG (`<= 5 MB`) con validación de magic bytes. |
+| **Módulo 6: Caja, Facturación y Webhook (`CajaPagosWebhookController`)** | `GET` / `POST` | `/api/recibos` | `Bearer JWT` | Consulta y emisión de comprobantes oficiales (`Pago` + `Recibo` con QR). |
+| | `GET` / `POST` / `PUT` / `DELETE` | `/api/descuentos` (`/api/descuentos/{id}`) | `Bearer JWT` (`admin` en escritura) | Catálogo de beneficios y promociones (`0 < porcentaje <= 100`, `RF138-RF142`). |
+| | `GET` / `POST` | `/api/facturas` | `Bearer JWT` | Consulta y emisión de comprobantes fiscales `Factura` (`RF125-RF127`). |
+| | `GET` / `POST` | `/api/reembolsos` | `Bearer JWT` | Consulta y emisión de notas de reintegro `Reembolso` (`RF131-RF133`). |
+| | `POST` | `/api/pagos/webhook` | Público (Webhook MP) | Recibe notificaciones de Mercado Pago, concilia `Pago` (`aprobado`/`completado`), actualiza `Recibo` y confirma la `Reserva` asociada (`RD01`). |

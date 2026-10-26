@@ -20,7 +20,14 @@ Este directorio contiene el backend en **C# (.NET 8)** estructurado bajo **Clean
   - `Payments/MercadoPagoService.cs`: Adaptador del SDK oficial `mercadopago-sdk` (`PreferenceClient`).
   - `Authentication/SupabaseJwtValidator.cs` y `CurrentUserService.cs`: Validación y enriquecimiento de tokens JWT emitidos por Supabase Auth.
 - **`Api/`**:
-  - `Controllers/ReservasController.cs` y `HealthController.cs`.
+  - `Controllers/`:
+    - `HealthController.cs`: Healthcheck (`/api/health`).
+    - `AuthUsuariosController.cs`: Login, registro, perfil (`/api/auth/*`), padrón de usuarios (`/api/usuarios`), socios (`/api/socios`) y asignación de descuentos (`/api/usuarios/{id}/descuentos`).
+    - `CanchasStockController.cs`: Canchas (`/api/canchas`), tipos de cancha (`/api/tipos-cancha`), inventario deportivo (`/api/stock`) y política de reserva (`/api/configuracion`).
+    - `ReservasController.cs`: Reservas atómicas con seña del 50% en Mercado Pago, liquidación de saldo y cancelaciones (`/api/reservas`).
+    - `CompetenciasController.cs`: Torneos (`/api/torneos`), ligas (`/api/ligas`), tipos de competencia (`/api/tipos-competencia`), reglamentos, inscripciones, enfrentamientos y tabla de posiciones.
+    - `AcademiaDocumentosController.cs`: Profesores y certificaciones (`/api/profesores`), clases y entrenamientos TPT (`/api/clases`), asistencias, turnos particulares (`/api/clases-particulares`) y documentos binarios (`/api/documentos`).
+    - `CajaPagosWebhookController.cs`: Recibos (`/api/recibos`), descuentos (`/api/descuentos`), facturas (`/api/facturas`), reembolsos (`/api/reembolsos`) y Webhook de Mercado Pago (`/api/pagos/webhook`).
   - `Middleware/ExceptionHandlingMiddleware.cs`: Respuestas de error estandarizadas `{ "error": "..." }`.
 
 ---
